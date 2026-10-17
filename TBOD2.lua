@@ -20,7 +20,7 @@ local localPlayer = Players.LocalPlayer
 -- Configuration
 local CONFIG = {
 	GuiName = "TycoonManagerGui",
-	Font    = Enum.Font.GothamBold,
+	Font    = Enum.Font.Arcade,
 
 	Colors = {
 		Background = Color3.fromRGB(15, 15, 18),
@@ -210,7 +210,6 @@ local function parsePrice(str)
 	if cleanStr:find("free") then return 0 end
 	local num = tonumber(cleanStr:match("[%d%.]+"))
 	if not num then return nil end
-	-- Check longer suffixes first to avoid false-positive (qi before q, qa before q, etc.)
 	if     cleanStr:find("qi$") or cleanStr:find("qi[^a-z]") then num = num * 1e18
 	elseif cleanStr:find("qa$") or cleanStr:find("qa[^a-z]") then num = num * 1e15
 	elseif cleanStr:find("sp$") or cleanStr:find("sp[^a-z]") then num = num * 1e24
@@ -316,17 +315,17 @@ addCorner(Header, 8)
 local Title = new("TextLabel", {
 	Name = "Title", BackgroundTransparency = 1, Position = UDim2.new(0, 10, 0, 0), Size = UDim2.new(1, -70, 1, 0),
 	Font = CONFIG.Font, RichText = true, Text = "TBOD^2 Manager [Stats & Auto Farm]",
-	TextColor3 = C.Text, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left,
+	TextColor3 = C.Text, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left,
 }, Header)
 
 local MinimizeBtn = new("TextButton", {
 	Name = "MinimizeBtn", BackgroundTransparency = 1, Position = UDim2.new(1, -60, 0, 0), Size = UDim2.new(0, 30, 1, 0),
-	Font = CONFIG.Font, Text = "v", TextColor3 = C.Text, TextSize = 13,
+	Font = CONFIG.Font, Text = "v", TextColor3 = C.Text, TextSize = 14,
 }, Header)
 
 local CloseBtn = new("TextButton", {
 	Name = "CloseBtn", BackgroundTransparency = 1, Position = UDim2.new(1, -30, 0, 0), Size = UDim2.new(0, 30, 1, 0),
-	Font = CONFIG.Font, Text = "X", TextColor3 = C.Danger, TextSize = 13,
+	Font = CONFIG.Font, Text = "X", TextColor3 = C.Danger, TextSize = 14,
 }, Header)
 
 CloseBtn.MouseButton1Click:Connect(function()
@@ -346,7 +345,7 @@ new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder =
 local function makeButton(parent, name, text, bg)
 	local btn = new("TextButton", {
 		Name = name, BackgroundColor3 = bg or C.Panel, Size = UDim2.new(1, 0, 0, 25),
-		Font = CONFIG.Font, Text = text, TextColor3 = C.Text, TextSize = 12,
+		Font = CONFIG.Font, Text = text, TextColor3 = C.Text, TextSize = 14,
 	}, parent)
 	addCorner(btn, 6)
 	return btn
@@ -377,7 +376,7 @@ local PanelStats = new("Frame", {
 
 local StatsLabel = new("TextLabel", {
 	Name = "StatsLabel", BackgroundTransparency = 1, Position = UDim2.new(0, 10, 0, 0), Size = UDim2.new(1, -20, 0, 45),
-	Font = CONFIG.Font, Text = "Stats:\nCash: $0\nPlot: Searching...", TextColor3 = C.On, TextSize = 12,
+	Font = CONFIG.Font, Text = "Stats:\nCash: $0\nPlot: Searching...", TextColor3 = C.On, TextSize = 14,
 	TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
 }, PanelStats)
 
@@ -388,14 +387,14 @@ local RebirthContentFrame = new("Frame", {
 local function statLabel(name, y, height, text, color, size)
 	return new("TextLabel", {
 		Name = name, BackgroundTransparency = 1, Position = UDim2.new(0, 10, 0, y), Size = UDim2.new(1, -20, 0, height),
-		Font = CONFIG.Font, Text = text, TextColor3 = color, TextSize = size, TextWrapped = size == 12,
+		Font = CONFIG.Font, Text = text, TextColor3 = color, TextSize = size, TextWrapped = size <= 14,
 	}, RebirthContentFrame)
 end
 
-local PercentLabel      = statLabel("PercentLabel", 2, 18, "0%", C.Text, 14)
-local RebirthLabel      = statLabel("RebirthLabel", 36, 16, "Progress: Loading...", C.TextMuted, 12)
-local CappedStatusLabel = statLabel("CappedStatusLabel", 54, 16, "Capped: Loading...", C.TextMuted, 12)
-local NumbersLabel      = statLabel("NumbersLabel", 72, 32, "Numbers: Loading...", C.TextMuted, 12)
+local PercentLabel      = statLabel("PercentLabel", 2, 18, "0%", C.Text, 16)
+local RebirthLabel      = statLabel("RebirthLabel", 36, 16, "Progress: Loading...", C.TextMuted, 14)
+local CappedStatusLabel = statLabel("CappedStatusLabel", 54, 16, "Capped: Loading...", C.TextMuted, 14)
+local NumbersLabel      = statLabel("NumbersLabel", 72, 32, "Numbers: Loading...", C.TextMuted, 14)
 
 local ProgressBarBg = new("Frame", {
 	Name = "ProgressBarBg", BackgroundColor3 = C.Panel, BorderSizePixel = 0, Position = UDim2.new(0, 10, 0, 22),
@@ -452,7 +451,7 @@ local function refreshTabs()
 end
 
 for _, name in ipairs(tabOrder) do
-	local btn = new("TextButton", { Name = name .. "Tab", Size = UDim2.new(0, 100, 1, 0), Font = CONFIG.Font, Text = name, TextSize = 12 }, CategoryBar)
+	local btn = new("TextButton", { Name = name .. "Tab", Size = UDim2.new(0, 100, 1, 0), Font = CONFIG.Font, Text = name, TextSize = 14 }, CategoryBar)
 	addCorner(btn, 6)
 	addStroke(btn, C.Stroke, 1)
 	tabButtons[name] = btn
@@ -971,30 +970,21 @@ local function highlightMerchants()
 		currentValidCards[card] = true
 		local btn = merchantListButtons[card]
 		if not btn then
+			-- Chuyển khung sang màu xám đen C.Panel, viền C.Stroke chuẩn như các nút Auto Farm & Stats phía trên
 			btn = new("TextButton", {
 				Name                   = "CardEntry",
-				Size                   = UDim2.new(1, 0, 0, 28),
-				BackgroundColor3       = Color3.fromRGB(25, 145, 65),
-				Font                   = CONFIG.Font,
-				TextSize               = 13,
-				TextColor3             = Color3.fromRGB(255, 255, 255),
-				TextStrokeTransparency = 0.5,
-				TextStrokeColor3       = Color3.fromRGB(0, 0, 0),
+				Size                   = UDim2.new(1, 0, 0, 26),
+				BackgroundColor3       = C.Panel,             -- Đồng bộ nền xám đen chuẩn của UI
+				Font                   = CONFIG.Font,         -- Font Arcade
+				TextSize               = 14,                  -- Tỉ lệ pixel chuẩn 14px không vỡ
+				TextColor3             = C.On,                -- Xanh neon sáng (#3CC878) giống hệt màu cụm "Stats:" ở trên
+				TextStrokeTransparency = 1,                   -- Tắt stroke tránh làm nhòe pixel
 				TextWrapped            = false,
 				AutoButtonColor        = false,
 			}, MerchantsListFrame)
 
-			addCorner(btn, 8)
-			addStroke(btn, Color3.fromRGB(74, 222, 128), 1.5)
-
-			new("UIGradient", {
-				Color = ColorSequence.new({
-					ColorSequenceKeypoint.new(0,   Color3.fromRGB(34, 180, 80)),
-					ColorSequenceKeypoint.new(0.5, Color3.fromRGB(25, 145, 65)),
-					ColorSequenceKeypoint.new(1,   Color3.fromRGB(18, 115, 50)),
-				}),
-				Rotation = 90,
-			}, btn)
+			addCorner(btn, 6)
+			addStroke(btn, C.Stroke, 1)
 
 			new("UIPadding", {
 				PaddingLeft  = UDim.new(0, 8),
@@ -1004,15 +994,17 @@ local function highlightMerchants()
 			merchantListButtons[card] = btn
 			btn.MouseButton1Click:Connect(function() fireCardDetector(card) end)
 
+			-- Hiệu ứng hover đồng bộ với tông xám sáng của UI
 			btn.MouseEnter:Connect(function()
-				btn.BackgroundColor3 = Color3.fromRGB(18, 115, 50)
+				btn.BackgroundColor3 = C.Header
 			end)
 			btn.MouseLeave:Connect(function()
-				btn.BackgroundColor3 = Color3.fromRGB(25, 145, 65)
+				btn.BackgroundColor3 = C.Panel
 			end)
 		end
 
-		btn.Text = string.format("• %s  |  %s  |  %s", card.Name, data.priceText, data.bitsText)
+		-- Format chữ nét với dấu * chuẩn Arcade
+		btn.Text = string.format("* %s  |  %s  |  %s", card.Name, data.priceText, data.bitsText)
 		btn.LayoutOrder = rank
 		btn.Visible = true
 	end
