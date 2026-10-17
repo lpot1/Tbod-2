@@ -67,10 +67,7 @@ local CONFIG = {
 			{ id = "Essence",     text = "Essence Cap" },
 			{ id = "RebirthNoti", text = "Progress 100%" },
 		},
-		ObeliskPath       = { "Obelisk", "RebirthButton", "Click" },
-		ManualTitle       = "Manual Rebirth",
-		ManualFailText    = "Conditions for rebirth have not been met.",
-		ManualFailSeconds = 3,
+		ObeliskPath = { "Obelisk", "RebirthButton", "Click" },
 	},
 
 	TrackedTexts = {
@@ -432,7 +429,7 @@ local BeamToggleBtn        = makeButton(PanelAutoFarm, "BeamToggleBtn", "Guideli
 local MerchantLocatorBtn   = makeButton(PanelAutoFarm, "MerchantLocatorBtn", "Merchant Locator: OFF", C.Panel)
 local AutoPickToggleBtn    = makeButton(PanelAutoFarm, "AutoPickToggleBtn", "Auto Bits: OFF", C.Panel)
 local AntiAfkToggleBtn     = makeButton(PanelAutoFarm, "AntiAfkToggleBtn", "Anti-AFK: OFF", C.Panel)
-local ManualRebirthBtn     = makeButton(PanelAutoFarm, "ManualRebirthBtn", "Manual Rebirth", C.Panel)
+local ManualRebirthBtn     = makeButton(PanelAutoFarm, "ManualRebirthBtn", "Open Rebirth GUI", C.Panel)
 
 -- Tab management
 local panels = { Stats = PanelStats, ["Auto Farm"] = PanelAutoFarm }
@@ -970,15 +967,14 @@ local function highlightMerchants()
 		currentValidCards[card] = true
 		local btn = merchantListButtons[card]
 		if not btn then
-			-- Chuyển khung sang màu xám đen C.Panel, viền C.Stroke chuẩn như các nút Auto Farm & Stats phía trên
 			btn = new("TextButton", {
 				Name                   = "CardEntry",
 				Size                   = UDim2.new(1, 0, 0, 26),
-				BackgroundColor3       = C.Panel,             -- Đồng bộ nền xám đen chuẩn của UI
-				Font                   = CONFIG.Font,         -- Font Arcade
-				TextSize               = 14,                  -- Tỉ lệ pixel chuẩn 14px không vỡ
-				TextColor3             = C.On,                -- Xanh neon sáng (#3CC878) giống hệt màu cụm "Stats:" ở trên
-				TextStrokeTransparency = 1,                   -- Tắt stroke tránh làm nhòe pixel
+				BackgroundColor3       = C.Panel,
+				Font                   = CONFIG.Font,
+				TextSize               = 14,
+				TextColor3             = C.On,
+				TextStrokeTransparency = 1,
 				TextWrapped            = false,
 				AutoButtonColor        = false,
 			}, MerchantsListFrame)
@@ -994,7 +990,6 @@ local function highlightMerchants()
 			merchantListButtons[card] = btn
 			btn.MouseButton1Click:Connect(function() fireCardDetector(card) end)
 
-			-- Hiệu ứng hover đồng bộ với tông xám sáng của UI
 			btn.MouseEnter:Connect(function()
 				btn.BackgroundColor3 = C.Header
 			end)
@@ -1003,7 +998,6 @@ local function highlightMerchants()
 			end)
 		end
 
-		-- Format chữ nét với dấu * chuẩn Arcade
 		btn.Text = string.format("* %s  |  %s  |  %s", card.Name, data.priceText, data.bitsText)
 		btn.LayoutOrder = rank
 		btn.Visible = true
@@ -1062,6 +1056,18 @@ local function checkCappedState()
 	return ok and result or false
 end
 
+-- Mở GUI Rebirth bằng cách kích hoạt ClickDetector của Obelisk
+local function openRebirthGui()
+	pcall(function()
+		local clickPart = resolvePath({ "Workspace", table.unpack(CONFIG.Rebirth.ObeliskPath) })
+		local detector = clickPart and clickPart:FindFirstChildOfClass("ClickDetector")
+		if detector then
+			detector.MaxActivationDistance = math.huge
+			fireclickdetector(detector)
+		end
+	end)
+end
+
 local function clickRebirthConfirm()
 	local gui = getPlayerGui() or localPlayer:WaitForChild("PlayerGui", 3)
 	if not gui then return end
@@ -1095,14 +1101,7 @@ local function triggerRebirth()
 	if not State.isRebirthing then
 		State.isRebirthing = true
 		task.spawn(function()
-			pcall(function()
-				local clickPart = resolvePath({ "Workspace", table.unpack(CONFIG.Rebirth.ObeliskPath) })
-				local detector = clickPart and clickPart:FindFirstChildOfClass("ClickDetector")
-				if detector then
-					detector.MaxActivationDistance = math.huge
-					fireclickdetector(detector)
-				end
-			end)
+			openRebirthGui()
 			task.wait(CONFIG.Rebirth.ConfirmDelay)
 			pcall(clickRebirthConfirm)
 			task.wait(CONFIG.Rebirth.Cooldown)
@@ -1201,21 +1200,9 @@ local function updateMonitor()
 	ProgressBarFill:TweenSize(UDim2.new(percent / 100, 0, 1, 0), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
 end
 
-local function notify(title, text, duration)
-	pcall(function()
-		StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = duration })
-	end)
-end
-
+-- Manual: chỉ mở GUI Rebirth, không tự xác nhận, không teleport
 ManualRebirthBtn.MouseButton1Click:Connect(function()
-	local progressText = globalProgressLabel and globalProgressLabel.Text or ""
-	local rebirthNotiText = trackedTexts["RebirthNotification"]
-	local hasRebirthNoti = rebirthNotiText ~= nil and rebirthNotiText ~= "" and rebirthNotiText ~= "N/A"
-	if parseProgress(progressText) >= 100 or hasRebirthNoti then
-		triggerRebirth()
-	else
-		notify(CONFIG.Rebirth.ManualTitle, CONFIG.Rebirth.ManualFailText, CONFIG.Rebirth.ManualFailSeconds)
-	end
+	openRebirthGui()
 end)
 
 task.spawn(function()
