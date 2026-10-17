@@ -112,6 +112,13 @@ local CONFIG = {
 		MaxDistance = 4000,
 		Color       = Color3.fromRGB(77, 0, 201),
 	},
+
+	DefaultBuyMode = 1,
+	BuyModes = {
+		{ id = "Remote",   text = "Mode: Remote" },
+		{ id = "Teleport", text = "Mode: Teleport" },
+		{ id = "Pathfind", text = "Mode: Pathfind" },
+	},
 }
 
 local C = CONFIG.Colors
@@ -145,7 +152,7 @@ local State = {
 	autoPickCardEnabled    = false,
 	merchantLocatorEnabled = false,
 	antiAfkEnabled         = false,
-	usePathfind            = false,
+	buyModeIndex           = CONFIG.DefaultBuyMode,
 	rebirthModeIndex       = CONFIG.Rebirth.DefaultMode,
 	isRebirthing           = false,
 	isTeleportingPlot      = false,
@@ -422,7 +429,7 @@ local merchantListButtons = {}
 -- Auto Farm Panel
 local PanelAutoFarm = makeListPanel("PanelAutoFarm", 200, true)
 local AutoBuyToggleBtn     = makeButton(PanelAutoFarm, "AutoBuyToggleBtn", "Auto Buy: OFF", C.Panel)
-local MoveModeBtn          = makeButton(PanelAutoFarm, "MoveModeBtn", "Mode: Teleport", C.Panel)
+local MoveModeBtn          = makeButton(PanelAutoFarm, "MoveModeBtn", CONFIG.BuyModes[State.buyModeIndex].text, (CONFIG.BuyModes[State.buyModeIndex].id == "Remote" and C.On) or C.Panel)
 local AutoRebirthToggleBtn = makeButton(PanelAutoFarm, "AutoRebirthToggleBtn", "Auto Rebirth: OFF", C.Panel)
 local RebirthModeBtn       = makeButton(PanelAutoFarm, "RebirthModeBtn", CONFIG.Rebirth.Modes[State.rebirthModeIndex].text, C.Panel)
 local BeamToggleBtn        = makeButton(PanelAutoFarm, "BeamToggleBtn", "Guidelines: OFF", C.Panel)
@@ -476,9 +483,10 @@ bindToggle(MerchantLocatorBtn, "Merchant Locator", "merchantLocatorEnabled", C.O
 bindToggle(AntiAfkToggleBtn, "Anti-AFK", "antiAfkEnabled", C.On)
 
 MoveModeBtn.MouseButton1Click:Connect(function()
-	State.usePathfind = not State.usePathfind
-	MoveModeBtn.BackgroundColor3 = State.usePathfind and C.Accent or C.Panel
-	MoveModeBtn.Text = State.usePathfind and "Mode: Pathfind" or "Mode: Teleport"
+	State.buyModeIndex = State.buyModeIndex % #CONFIG.BuyModes + 1
+	local mode = CONFIG.BuyModes[State.buyModeIndex]
+	MoveModeBtn.Text = mode.text
+	MoveModeBtn.BackgroundColor3 = (mode.id == "Remote" and C.On) or (mode.id == "Pathfind" and C.Accent) or C.Panel
 end)
 
 RebirthModeBtn.MouseButton1Click:Connect(function()
@@ -719,7 +727,23 @@ local function moveToTarget(target)
 
 	cancelPath()
 
-	if not State.usePathfind then
+	local modeId = CONFIG.BuyModes[State.buyModeIndex].id
+	if modeId == "Remote" then
+		local btnPart = target:IsA("BasePart") and target
+			or target:FindFirstChild("Head")
+			or target:FindFirstChild("Part")
+			or target:FindFirstChildWhichIsA("BasePart")
+		if btnPart and firetouchinterest then
+			firetouchinterest(root, btnPart, 0)
+			task.wait(0.02)
+			firetouchinterest(root, btnPart, 1)
+		else
+			pcall(function()
+				root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
+			end)
+		end
+		return
+	elseif modeId == "Teleport" then
 		pcall(function()
 			root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
 		end)
@@ -1296,7 +1320,9 @@ local function updateShop()
 	table.sort(affordable, function(a, b) return a.price < b.price end)
 
 	if State.autoBuyEnabled and localPlayer.Character and #affordable > 0 then
-		if tick() - lastAutoBuyTime >= CONFIG.Intervals.AutoBuyCooldown then
+		local modeId = CONFIG.BuyModes[State.buyModeIndex].id
+		local cooldown = (modeId == "Remote" and 0.05) or CONFIG.Intervals.AutoBuyCooldown
+		if tick() - lastAutoBuyTime >= cooldown then
 			local target = affordable[1]
 			if target and isButtonActive(target.instance) then
 				lastAutoBuyTime = tick()
@@ -1359,3 +1385,4 @@ env.TycoonManagerCleanup = function()
 	ScreenGui:Destroy()
 	env.TycoonManagerCleanup = nil
 end
+
