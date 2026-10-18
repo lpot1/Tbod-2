@@ -47,7 +47,7 @@ local CONFIG = {
 	Intervals = {
 		MerchantUpdate  = 0.1,
 		MerchantGate    = 1,
-		ShopUpdate      = 0.1,
+		ShopUpdate      = 0.04,
 		MonitorPoll     = 1.2,
 		TextPoll        = 1.5,
 		AutoBuyCooldown = 0.125,
@@ -1321,12 +1321,49 @@ local function updateShop()
 
 	if State.autoBuyEnabled and localPlayer.Character and #affordable > 0 then
 		local modeId = CONFIG.BuyModes[State.buyModeIndex].id
-		local cooldown = (modeId == "Remote" and 0.05) or CONFIG.Intervals.AutoBuyCooldown
-		if tick() - lastAutoBuyTime >= cooldown then
-			local target = affordable[1]
-			if target and isButtonActive(target.instance) then
-				lastAutoBuyTime = tick()
-				moveToTarget(target.instance)
+		if modeId == "Remote" then
+			local root = localPlayer.Character:FindFirstChild("HumanoidRootPart")
+			if root and firetouchinterest then
+				local passes = 0
+				local boughtAny = false
+				repeat
+					boughtAny = false
+					passes = passes + 1
+					for _, item in ipairs(affordable) do
+						local btn = item.instance
+						if isButtonActive(btn) then
+							local btnPart = btn:IsA("BasePart") and btn
+								or btn:FindFirstChild("Head")
+								or btn:FindFirstChild("Part")
+								or btn:FindFirstChildWhichIsA("BasePart")
+							if btnPart then
+								firetouchinterest(root, btnPart, 0)
+								task.wait(0.01)
+								firetouchinterest(root, btnPart, 1)
+								boughtAny = true
+							end
+						end
+					end
+					if boughtAny and passes < 5 then
+						task.wait(0.02)
+						cashNum = getPlayerCash()
+						affordable = {}
+						for _, btn in ipairs(myTycoon.Buttons:GetChildren()) do
+							local pNum = getButtonDetails(btn)
+							if pNum and cashNum >= pNum then
+								table.insert(affordable, { instance = btn, price = pNum })
+							end
+						end
+					end
+				until not boughtAny or passes >= 5
+			end
+		else
+			if tick() - lastAutoBuyTime >= CONFIG.Intervals.AutoBuyCooldown then
+				local target = affordable[1]
+				if target and isButtonActive(target.instance) then
+					lastAutoBuyTime = tick()
+					moveToTarget(target.instance)
+				end
 			end
 		end
 	end
