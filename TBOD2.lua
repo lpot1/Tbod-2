@@ -182,18 +182,8 @@ end
 
 local function resolvePath(pathParts)
 	local current = game
-	for i, name in ipairs(pathParts) do
-		if i == 1 then
-			if name == "Workspace" then
-				current = Workspace
-			elseif name == "Players" then
-				current = Players
-			else
-				current = current:FindFirstChild(name)
-			end
-		else
-			current = current:FindFirstChild(name)
-		end
+	for _, name in ipairs(pathParts) do
+		current = current:FindFirstChild(name)
 		if not current then return nil end
 	end
 	return current
@@ -615,48 +605,20 @@ local essenceCache = { time = 0, value = false }
 local function isEssenceCapped()
 	local now = tick()
 	if now - essenceCache.time < CONFIG.Rebirth.EssenceScanCache then return essenceCache.value end
-	local phrase = string.lower(CONFIG.Rebirth.EssencePhrase)
-	local capped = false
-	local pGui = getPlayerGui()
-
-	if pGui then
-		local notiHolder = pGui:FindFirstChild("System")
-			and pGui.System:FindFirstChild("Notifications")
-			and pGui.System.Notifications:FindFirstChild("NotiHolder")
-
-		-- 1. Nguồn tin cậy thời gian thực số 1: Notification EssenceCappedTemp trong NotiHolder
-		if notiHolder and notiHolder:FindFirstChild("EssenceCappedTemp") then
-			capped = true
-		end
-
-		-- 2. Chỉ kiểm tra nhãn Capped trong Main.Rebirth KHI bảng Rebirth đang THỰC SỰ MỞ trên màn hình
-		-- (Khi bảng đóng, game không reset Capped.Visible về false dẫn đến lưu giá trị cũ sau khi rebirth)
-		if not capped then
-			local main = pGui:FindFirstChild("Main")
-			local rebirthFrame = main and main:FindFirstChild("Rebirth")
-			if rebirthFrame and (rebirthFrame.Visible or rebirthFrame.Position.Y.Scale >= 0) then
-				local cappedLabel = rebirthFrame:FindFirstChild("Capped", true)
-				if cappedLabel and cappedLabel:IsA("GuiObject") and cappedLabel.Visible then
+	local phrase = CONFIG.Rebirth.EssencePhrase
+	local tracked = trackedTexts["EssenceCappedTemp"]
+	local capped = tracked ~= nil and string.find(string.lower(tracked), phrase, 1, true) ~= nil
+	if not capped then
+		local pGui = getPlayerGui()
+		if pGui then
+			for _, v in ipairs(pGui:GetDescendants()) do
+				if (v:IsA("TextLabel") or v:IsA("TextButton")) and v.Visible and string.find(string.lower(tostring(v.Text or "")), phrase, 1, true) then
 					capped = true
-				end
-			end
-		end
-
-		-- 3. Quét các nhãn trong NotiHolder nếu template chứa text essence cap
-		if not capped and notiHolder then
-			for _, desc in ipairs(notiHolder:GetDescendants()) do
-				if desc:IsA("TextLabel") and desc.Visible and desc.Text ~= "" then
-					local textLower = string.lower(desc.Text)
-					if string.find(textLower, phrase, 1, true)
-						or (string.find(textLower, "essence", 1, true) and string.find(textLower, "cap", 1, true)) then
-						capped = true
-						break
-					end
+					break
 				end
 			end
 		end
 	end
-
 	essenceCache.time, essenceCache.value = now, capped
 	return capped
 end
@@ -1081,197 +1043,109 @@ local function rebirthPair(n) return string.format("(%d --> %d)", n, n + 1) end
 local function isBlank(s) return s == nil or s == "" or s == "N/A" end
 
 local function checkCappedState()
-	return isEssenceCapped()
-end
-
-local function getObeliskClick()
-	local obelisk = Workspace:FindFirstChild("Obelisk") or Workspace:FindFirstChild("Obelisk", true)
-	if not obelisk then return nil end
-	local rebirthBtn = obelisk:FindFirstChild("RebirthButton") or obelisk:FindFirstChild("RebirthButton", true)
-	local clickPart = rebirthBtn and (rebirthBtn:FindFirstChild("Click") or rebirthBtn:FindFirstChildWhichIsA("BasePart"))
-	return clickPart or obelisk:FindFirstChild("Click", true)
-end
-
--- Mở GUI Rebirth bằng cách kích hoạt ClickDetector hoặc ProximityPrompt của Obelisk
-local function openRebirthGui()
-	pcall(function()
-		local clickPart = getObeliskClick()
-		if not clickPart then
-			clickPart = resolvePath({ "Workspace", table.unpack(CONFIG.Rebirth.ObeliskPath) })
+	if not globalCappedObj then
+		local playerGui = getPlayerGui()
+		local main = playerGui and playerGui:FindFirstChild("Main")
+		if main and main:FindFirstChild("Rebirth", true) then
+			globalCappedObj = main.Rebirth:FindFirstChild("Capped", true)
 		end
-		if not clickPart then return end
-
-		local detector = clickPart:FindFirstChildOfClass("ClickDetector")
-		if detector then
-			detector.MaxActivationDistance = math.huge
-			if fireclickdetector then
-				fireclickdetector(detector)
+		if not globalCappedObj then
+			local starterMain = StarterGui:FindFirstChild("Main")
+			if starterMain then globalCappedObj = starterMain:FindFirstChild("Capped", true) end
+		end
+	end
+	if not globalCappedObj then return false end
+	local targetObj = globalCappedObj
+	local playerGui = getPlayerGui()
+	if globalCappedObj:IsDescendantOf(StarterGui) and playerGui then
+		local relativePath = globalCappedObj:GetFullName():gsub("^StarterGui", "PlayerGui")
+		local found = playerGui
+		for part in relativePath:gmatch("[^%.]+") do
+			if part ~= "PlayerGui" then
+				found = found:FindFirstChild(part)
+				if not found then break end
 			end
 		end
+		if found then targetObj = found end
+	end
+	local current = targetObj
+	local ok, result = pcall(function()
+		while current do
+			if current:IsA("GuiObject") and not current.Visible then return false end
+			if current:IsA("ScreenGui") then return current.Enabled end
+			current = current.Parent
+		end
+		return true
+	end)
+	return ok and result or false
+end
 
-		local prompt = clickPart:FindFirstChildOfClass("ProximityPrompt")
-		if prompt and fireproximityprompt then
-			prompt.RequiresLineOfSight = false
-			prompt.MaxActivationDistance = math.huge
-			fireproximityprompt(prompt)
+-- Mở GUI Rebirth bằng cách kích hoạt ClickDetector của Obelisk
+local function openRebirthGui()
+	pcall(function()
+		local clickPart = resolvePath({ "Workspace", table.unpack(CONFIG.Rebirth.ObeliskPath) })
+		local detector = clickPart and clickPart:FindFirstChildOfClass("ClickDetector")
+		if detector then
+			detector.MaxActivationDistance = math.huge
+			fireclickdetector(detector)
 		end
 	end)
 end
 
 local function clickRebirthConfirm()
-	local pGui = getPlayerGui() or localPlayer:WaitForChild("PlayerGui", 3)
-	if not pGui then return false end
-
-	local main = pGui:FindFirstChild("Main")
-	local rebirthFrame = main and main:FindFirstChild("Rebirth")
-	if not rebirthFrame then return false end
-
-	local confirmBtn = rebirthFrame:FindFirstChild("Inner") and rebirthFrame.Inner:FindFirstChild("Rebirth")
-	if not confirmBtn then
-		confirmBtn = rebirthFrame:FindFirstChild("Rebirth", true)
+	local gui = getPlayerGui() or localPlayer:WaitForChild("PlayerGui", 3)
+	if not gui then return end
+	local function realClick(btn)
+		local pos, size = btn.AbsolutePosition, btn.AbsoluteSize
+		local inset = GuiService:GetGuiInset()
+		local x = pos.X + size.X / 2
+		local y = pos.Y + size.Y / 2 + inset.Y
+		VirtualInputManager:SendMouseMoveEvent(x, y, game)
+		task.wait(0.02)
+		VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
+		task.wait(0.05)
+		VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
 	end
-	if not confirmBtn or not (confirmBtn:IsA("TextButton") or confirmBtn:IsA("ImageButton")) then
-		return false
-	end
-
-	-- 1. firesignal
-	if firesignal then
-		pcall(function() firesignal(confirmBtn.MouseButton1Click) end)
-		pcall(function() firesignal(confirmBtn.Activated) end)
-	end
-
-	-- 2. getconnections
-	if getconnections then
-		for _, conn in ipairs(getconnections(confirmBtn.MouseButton1Click)) do
-			pcall(function() conn:Fire() end)
-		end
-		for _, conn in ipairs(getconnections(confirmBtn.Activated)) do
-			pcall(function() conn:Fire() end)
-		end
-	end
-
-	-- 3. VirtualInputManager fallback (chỉ khi tọa độ Y > 0 trên màn hình)
-	pcall(function()
-		local pos, size = confirmBtn.AbsolutePosition, confirmBtn.AbsoluteSize
-		if pos.Y > 0 and size.X > 0 and size.Y > 0 then
-			local inset = GuiService:GetGuiInset()
-			local x = pos.X + size.X / 2
-			local y = pos.Y + size.Y / 2 + inset.Y
-			VirtualInputManager:SendMouseMoveEvent(x, y, game)
-			task.wait(0.02)
-			VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
-			task.wait(0.05)
-			VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
-		end
-	end)
-
-	return true
-end
-
--- Tự động nhấn YES khi xuất hiện hộp thoại sequence: "Would you like to teleport back to your plot?"
-local function handleRebirthSequenceTeleport()
-	local pGui = getPlayerGui()
-	if not pGui then return false end
-
-	local seq = pGui:FindFirstChild("Rebirth")
-		or (pGui:FindFirstChild("ScreenSequences") and pGui.ScreenSequences:FindFirstChild("Rebirth"))
-	if not seq then return false end
-
-	local yesBtn = seq:FindFirstChild("yesButton", true)
-	if yesBtn and yesBtn:IsA("TextButton") then
-		if firesignal then
-			pcall(function() firesignal(yesBtn.MouseButton1Click) end)
-		end
-		if getconnections then
-			for _, conn in ipairs(getconnections(yesBtn.MouseButton1Click)) do
-				pcall(function() conn:Fire() end)
+	for _, v in ipairs(gui:GetDescendants()) do
+		if (v:IsA("TextButton") or v:IsA("ImageButton")) and v.Visible then
+			local nameCheck = string.upper(tostring(v.Name or ""))
+			local textCheck = ""
+			if v:IsA("TextButton") then
+				pcall(function() textCheck = string.upper(tostring(v.Text or "")) end)
+			end
+			if nameCheck == "REBIRTH" or nameCheck == "REBIRTHBUTTON" or string.find(textCheck, "REBIRTH") then
+				realClick(v)
+				break
 			end
 		end
-		pcall(function()
-			local pos, size = yesBtn.AbsolutePosition, yesBtn.AbsoluteSize
-			if pos.Y > 0 and size.X > 0 and size.Y > 0 then
-				local inset = GuiService:GetGuiInset()
-				local x = pos.X + size.X / 2
-				local y = pos.Y + size.Y / 2 + inset.Y
-				VirtualInputManager:SendMouseMoveEvent(x, y, game)
-				task.wait(0.02)
-				VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
-				task.wait(0.05)
-				VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
-			end
-		end)
-		return true
 	end
-	return false
 end
 
 local function triggerRebirth()
-	if State.isRebirthing then return end
-	State.isRebirthing = true
-
-	task.spawn(function()
-		-- 1. Mở GUI Rebirth từ xa qua Obelisk Click/Prompt
-		openRebirthGui()
-
-		-- Chờ bảng Rebirth mở (vào trong màn hình)
-		local startWait = tick()
-		local pGui = getPlayerGui()
-		local rebirthFrame = pGui and pGui:FindFirstChild("Main") and pGui.Main:FindFirstChild("Rebirth")
-		while tick() - startWait < CONFIG.Rebirth.ConfirmDelay do
-			if rebirthFrame and (rebirthFrame.Visible or rebirthFrame.Position.Y.Scale >= 0) then
-				break
-			end
-			task.wait(0.1)
-		end
-
-		-- 2. Bấm xác nhận Rebirth
-		for _ = 1, 3 do
-			clickRebirthConfirm()
-			task.wait(0.35)
-			if rebirthFrame and not rebirthFrame.Visible and rebirthFrame.Position.Y.Scale < 0 then
-				break
-			end
-		end
-
-		-- 3. Xử lý màn hình sequence hỏi teleport về plot
-		local startSeq = tick()
-		while tick() - startSeq < CONFIG.Rebirth.TeleportDelay do
-			if handleRebirthSequenceTeleport() then
-				break
-			end
-			task.wait(0.15)
-		end
-
-		-- 4. Backup teleport về Plot nếu cần
-		task.wait(0.5)
-		pcall(function()
-			local myPlotName = getMyPlot()
-			local plots = Workspace:FindFirstChild("Plots")
-			local plotObj = myPlotName ~= "None" and plots and plots:FindFirstChild(myPlotName)
-			local char = localPlayer.Character
-			local root = char and char:FindFirstChild("HumanoidRootPart")
-			if plotObj and root then
-				root.CFrame = getPlotSpawnCFrame(plotObj)
-			end
+	if not State.isRebirthing then
+		State.isRebirthing = true
+		task.spawn(function()
+			openRebirthGui()
+			task.wait(CONFIG.Rebirth.ConfirmDelay)
+			pcall(clickRebirthConfirm)
+			task.wait(CONFIG.Rebirth.Cooldown)
+			State.isRebirthing = false
 		end)
-
-		-- 5. Reset trạng thái Essence Capped ngay sau khi Rebirth hoàn tất
-		essenceCache.value = false
-		essenceCache.time = tick() + 2
-		trackedTexts["EssenceCappedTemp"] = nil
-		pcall(function()
-			local pGui = getPlayerGui()
-			local rebirthFrame = pGui and pGui:FindFirstChild("Main") and pGui.Main:FindFirstChild("Rebirth")
-			local cappedLabel = rebirthFrame and rebirthFrame:FindFirstChild("Capped", true)
-			if cappedLabel and cappedLabel:IsA("GuiObject") then
-				cappedLabel.Visible = false
-			end
+	end
+	if not State.isTeleportingPlot then
+		State.isTeleportingPlot = true
+		task.spawn(function()
+			pcall(function()
+				task.wait(CONFIG.Rebirth.TeleportDelay)
+				local myPlotName = getMyPlot()
+				local plots = Workspace:FindFirstChild("Plots")
+				local plotObj = myPlotName ~= "None" and plots and plots:FindFirstChild(myPlotName)
+				local root = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
+				if plotObj and root then root.CFrame = getPlotSpawnCFrame(plotObj) end
+			end)
+			State.isTeleportingPlot = false
 		end)
-
-		task.wait(CONFIG.Rebirth.Cooldown)
-		State.isRebirthing = false
-		pcall(updateMonitor)
-	end)
+	end
 end
 
 local function updateMonitor()
@@ -1325,24 +1199,16 @@ local function updateMonitor()
 	local percent = textVal ~= "" and parseProgress(textVal) or 0
 
 	if State.autoRebirthEnabled then
-		local pGui = getPlayerGui()
-		local notiHolder = pGui and pGui:FindFirstChild("System")
-			and pGui.System:FindFirstChild("Notifications")
-			and pGui.System.Notifications:FindFirstChild("NotiHolder")
 		local rebirthNotiText = trackedTexts["RebirthNotification"]
-		local hasRebirthNoti = (rebirthNotiText ~= nil and rebirthNotiText ~= "" and rebirthNotiText ~= "N/A")
-			or (notiHolder and notiHolder:FindFirstChild("RebirthNotification") ~= nil)
-		local isProgressComplete = (percent >= 100) or hasRebirthNoti
-		local isCapped = isEssenceCapped()
-
+		local hasRebirthNoti = rebirthNotiText ~= nil and rebirthNotiText ~= "" and rebirthNotiText ~= "N/A"
 		local mode = CONFIG.Rebirth.Modes[State.rebirthModeIndex].id
-		local shouldRebirth = false
+		local shouldRebirth
 		if mode == "Any" then
-			shouldRebirth = isCapped or isProgressComplete
+			shouldRebirth = isEssenceCapped() or hasRebirthNoti
 		elseif mode == "Essence" then
-			shouldRebirth = isCapped
-		elseif mode == "RebirthNoti" then
-			shouldRebirth = isProgressComplete
+			shouldRebirth = isEssenceCapped()
+		else
+			shouldRebirth = hasRebirthNoti
 		end
 		if shouldRebirth then triggerRebirth() end
 	end
@@ -1364,9 +1230,9 @@ ManualRebirthBtn.MouseButton1Click:Connect(function()
 end)
 
 task.spawn(function()
-	local textConn, cappedConn, numbersConn, leaderConn, notiAddConn, notiRemConn
+	local textConn, cappedConn, numbersConn, leaderConn
 	cleanupHooks[#cleanupHooks + 1] = function()
-		for _, conn in ipairs({ textConn, cappedConn, numbersConn, leaderConn, notiAddConn, notiRemConn }) do
+		for _, conn in ipairs({ textConn, cappedConn, numbersConn, leaderConn }) do
 			if conn then conn:Disconnect() end
 		end
 	end
@@ -1374,9 +1240,6 @@ task.spawn(function()
 		if textConn then textConn:Disconnect() textConn = nil end
 		if cappedConn then cappedConn:Disconnect() cappedConn = nil end
 		if numbersConn then numbersConn:Disconnect() numbersConn = nil end
-		if notiAddConn then notiAddConn:Disconnect() notiAddConn = nil end
-		if notiRemConn then notiRemConn:Disconnect() notiRemConn = nil end
-
 		pcall(function()
 			globalProgressLabel = gui:WaitForChild("System", 2):WaitForChild("RebirthProgress", 2):WaitForChild("Progress", 2):WaitForChild("TextLabel", 2)
 		end)
@@ -1399,20 +1262,6 @@ task.spawn(function()
 				if rebirthFrame then globalNumbersLabel = rebirthFrame:FindFirstChild("Numbers", true) end
 			end
 		end)
-		pcall(function()
-			local notiHolder = gui:WaitForChild("System", 2):WaitForChild("Notifications", 2):WaitForChild("NotiHolder", 2)
-			if notiHolder then
-				notiAddConn = notiHolder.ChildAdded:Connect(function()
-					task.wait(0.05)
-					updateMonitor()
-				end)
-				notiRemConn = notiHolder.ChildRemoved:Connect(function()
-					task.wait(0.05)
-					updateMonitor()
-				end)
-			end
-		end)
-
 		if globalProgressLabel then textConn = globalProgressLabel:GetPropertyChangedSignal("Text"):Connect(updateMonitor) end
 		if globalCappedObj then cappedConn = globalCappedObj:GetPropertyChangedSignal("Visible"):Connect(updateMonitor) end
 		if globalNumbersLabel then numbersConn = globalNumbersLabel:GetPropertyChangedSignal("Text"):Connect(updateMonitor) end
