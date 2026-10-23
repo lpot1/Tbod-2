@@ -8,10 +8,9 @@ local RunService          = game:GetService("RunService")
 local CoreGui             = game:GetService("CoreGui")
 local PathfindingService  = game:GetService("PathfindingService")
 local GuiService          = game:GetService("GuiService")
+local StarterGui          = game:GetService("StarterGui")
 local UserInputService    = game:GetService("UserInputService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
-local StarterGui          = game:GetService("StarterGui")
-
 local Workspace           = game:GetService("Workspace")
 local VirtualUser         = game:GetService("VirtualUser")
 
@@ -41,41 +40,26 @@ local CONFIG = {
 		MinimizedHeight = 30,
 		HeaderHeight    = 30,
 		PanelY          = 70,
-		PanelPadding    = 5,
 	},
 
 	Intervals = {
-		MerchantUpdate  = 0.1,
-		MerchantGate    = 1,
-		ShopUpdate      = 0.04,
-		MonitorPoll     = 1.2,
-		TextPoll        = 1.5,
-		AutoBuyCooldown = 0.125,
-		MerchantLocator = 0.1,
+		Shop            = 0.20,
+		Stats           = 0.50,
+		Merchant        = 0.25,
+		Locator         = 0.20,
+		Rebirth         = 0.50,
+		AutoBuyCooldown = 0.22,
+		CardCooldown    = 0.40,
 	},
 
 	Rebirth = {
-		EssencePhrase    = "your essence is capped",
-		EssenceScanCache = 0.1,
-		ConfirmDelay     = 2,
-		Cooldown         = 4,
-		TeleportDelay    = 3,
-		PlotSpawnOffset  = 6,
-		DefaultMode      = 2,
-		Modes = {
-			{ id = "Any",         text = "Rebirth Trigger: Both" },
-			{ id = "Essence",     text = "Essence Cap" },
-			{ id = "RebirthNoti", text = "Progress 100%" },
-		},
-		ObeliskPath = { "Obelisk", "RebirthButton", "Click" },
+		EssencePhrase   = "your essence is capped",
+		ConfirmDelay    = 2,
+		Cooldown        = 4,
+		RetryCooldown   = 6,
+		TeleportDelay   = 3,
+		PlotSpawnOffset = 6,
 	},
-
-	TrackedTexts = {
-		EssenceCappedTemp   = { "Players", localPlayer.Name, "PlayerGui", "System", "Notifications", "NotiHolder", "EssenceCappedTemp", "Pos", "Text" },
-		RebirthNotification = { "Players", localPlayer.Name, "PlayerGui", "System", "Notifications", "NotiHolder", "RebirthNotification", "Pos", "Text" },
-	},
-
-	Suffixes = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, QA = 1e15, QI = 1e18, SX = 1e21, SP = 1e24, O = 1e27, N = 1e30, D = 1e33 },
 
 	Pathfinding = {
 		AgentRadius         = 2.5,
@@ -113,6 +97,8 @@ local CONFIG = {
 		Color       = Color3.fromRGB(77, 0, 201),
 	},
 
+	-- Remote keeps the original default; Teleport is the most reliable mode
+	-- because tycoon button purchases are validated server-side.
 	DefaultBuyMode = 1,
 	BuyModes = {
 		{ id = "Remote",   text = "Mode: Remote" },
@@ -123,16 +109,45 @@ local CONFIG = {
 
 local C = CONFIG.Colors
 
+-- Real abbreviation table used by the game (ReplicatedStorage.MODULES.NumberService)
+local SUFFIX_MULT = {
+	K = 1e3, M = 1e6, B = 1e9, T = 1e12,
+	QA = 1e15, QN = 1e18, SX = 1e21, SP = 1e24,
+	OC = 1e27, NO = 1e30, DE = 1e33, UD = 1e36,
+}
+
+local FORMAT_STEPS = {
+	{ 1e36, "Ud" }, { 1e33, "De" }, { 1e30, "No" }, { 1e27, "Oc" },
+	{ 1e24, "Sp" }, { 1e21, "Sx" }, { 1e18, "Qn" }, { 1e15, "Qa" },
+	{ 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" },
+}
+
+local ROMAN = {
+	{ 1000, "M" }, { 900, "CM" }, { 500, "D" }, { 400, "CD" },
+	{ 100, "C" }, { 90, "XC" }, { 50, "L" }, { 40, "XL" },
+	{ 10, "X" }, { 9, "IX" }, { 5, "V" }, { 4, "IV" }, { 1, "I" },
+}
+
 -- Shared state & cleanup
 local env = (getgenv and getgenv()) or _G
 
+if env.TBODManagerCleanup then
+	pcall(env.TBODManagerCleanup)
+end
 if env.TycoonManagerCleanup then
 	pcall(env.TycoonManagerCleanup)
 end
 
-local oldGui = CoreGui:FindFirstChild(CONFIG.GuiName)
-if oldGui then
-	oldGui:Destroy()
+local function getGuiParent()
+	return (gethui and gethui()) or CoreGui
+end
+
+local guiParent = getGuiParent()
+for _, parent in ipairs({ guiParent, CoreGui }) do
+	for _, name in ipairs({ CONFIG.GuiName, "TBODManagerGui" }) do
+		local oldGui = parent and parent:FindFirstChild(name)
+		if oldGui then oldGui:Destroy() end
+	end
 end
 
 local running = true
@@ -144,23 +159,26 @@ local function track(connection)
 	return connection
 end
 
--- Everything default to OFF
 local State = {
 	beamsEnabled           = false,
 	autoBuyEnabled         = false,
 	autoRebirthEnabled     = false,
+	essenceCapEnabled      = true,
 	autoPickCardEnabled    = false,
 	merchantLocatorEnabled = false,
 	antiAfkEnabled         = false,
 	buyModeIndex           = CONFIG.DefaultBuyMode,
-	rebirthModeIndex       = CONFIG.Rebirth.DefaultMode,
 	isRebirthing           = false,
-	isTeleportingPlot      = false,
+	isBuying               = false,
+	autoRebirthArmed       = false,
 	isMinimized            = false,
+	isLoadingTelekinesis   = false,
+	inventoryEnabled       = true,
 	activeTab              = "Stats",
+	status                 = "Idle",
+	lastRebirthAttempt     = 0,
+	lastCardBuy            = 0,
 }
-
-local trackedTexts = {}
 
 -- Helpers
 local function new(className, props, parent)
@@ -180,129 +198,91 @@ local function addStroke(parent, color, thickness)
 	return new("UIStroke", { Color = color or C.Stroke, Thickness = thickness or 1 }, parent)
 end
 
-local function resolvePath(pathParts)
-	local current = game
-	for _, name in ipairs(pathParts) do
-		current = current:FindFirstChild(name)
-		if not current then return nil end
+local function setText(label, text)
+	if label and label.Text ~= text then
+		label.Text = text
 	end
-	return current
 end
 
-local function parseSuffixValue(str)
-	if not str then return 0 end
-	str = string.upper(string.gsub(str, "[%,%$%s]", ""))
-	local num, suffix = string.match(str, "([%d%.]+)(%a*)")
-	num = tonumber(num) or 0
-	local mult = suffix and CONFIG.Suffixes[suffix]
-	return mult and num * mult or num
+local function parseNumber(str)
+	if str == nil then return nil end
+	local s = string.upper(tostring(str)):gsub("[%,%$%s]", "")
+	if s == "" then return nil end
+	if s:find("FREE", 1, true) then return 0 end
+
+	local num, suffix = string.match(s, "^([%d%.]+)(%a*)$")
+	if not num then
+		num = string.match(s, "([%d%.]+)")
+		suffix = nil
+	end
+
+	num = tonumber(num)
+	if not num then return nil end
+
+	if suffix and suffix ~= "" then
+		local mult = SUFFIX_MULT[suffix]
+		if mult then return num * mult end
+	end
+	return num
 end
 
-local FORMAT_STEPS = { { 1e18, "Qi" }, { 1e15, "Qa" }, { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } }
 local function formatNumber(num)
+	if not num or num ~= num then return "0" end
 	for _, step in ipairs(FORMAT_STEPS) do
 		if num >= step[1] then
 			return string.format("%.2f%s", num / step[1], step[2])
 		end
 	end
-	return string.format("%.0f", num)
+	if num == math.floor(num) then
+		return string.format("%d", num)
+	end
+	return (string.format("%.2f", num):gsub("0+$", ""):gsub("%.$", ""))
 end
 
-local function parsePrice(str)
-	if not str or str == "" then return nil end
-	local cleanStr = str:gsub("[$,]", ""):lower():gsub("%s+", "")
-	if cleanStr:find("free") then return 0 end
-	local num = tonumber(cleanStr:match("[%d%.]+"))
-	if not num then return nil end
-	if     cleanStr:find("qi$") or cleanStr:find("qi[^a-z]") then num = num * 1e18
-	elseif cleanStr:find("qa$") or cleanStr:find("qa[^a-z]") then num = num * 1e15
-	elseif cleanStr:find("sp$") or cleanStr:find("sp[^a-z]") then num = num * 1e24
-	elseif cleanStr:find("sx$") or cleanStr:find("sx[^a-z]") then num = num * 1e21
-	elseif cleanStr:find("t$")  or cleanStr:find("t[^a-z]")  then num = num * 1e12
-	elseif cleanStr:find("b$")  or cleanStr:find("b[^a-z]")  then num = num * 1e9
-	elseif cleanStr:find("m$")  or cleanStr:find("m[^a-z]")  then num = num * 1e6
-	elseif cleanStr:find("k$")  or cleanStr:find("k[^a-z]")  then num = num * 1e3
+local function romanToNumber(str)
+	if not str then return nil end
+	local s = string.upper(tostring(str)):gsub("%s", "")
+	if s == "" then return nil end
+	if s:match("^%d+$") then return tonumber(s) end
+
+	local i, total = 1, 0
+	while i <= #s do
+		local matched = false
+		for _, pair in ipairs(ROMAN) do
+			local len = #pair[2]
+			if string.sub(s, i, i + len - 1) == pair[2] then
+				total = total + pair[1]
+				i = i + len
+				matched = true
+				break
+			end
+		end
+		if not matched then return nil end
 	end
-	return num
+	return total
 end
 
 local function parseProgress(text)
-	if string.find(string.upper(text), "COMPLETE") then return 100 end
+	if not text or text == "" then return 0 end
+	if string.find(string.upper(text), "COMPLETE", 1, true) then return 100 end
 
-	local currentStr, maxStr = string.match(text, "([%d%,%.%a]+)%s*/%s*([%d%,%.%a]+)")
-	if currentStr and maxStr then
-		local current = parseSuffixValue(currentStr)
-		local max = parseSuffixValue(maxStr)
-		local leaderstats = localPlayer:FindFirstChild("leaderstats")
-		local cashVal = leaderstats and (leaderstats:FindFirstChild("Cash") or leaderstats:FindFirstChild("Money"))
-		if cashVal then
-			local rawCash = tonumber(cashVal.Value) or 0
-			if rawCash > current then current = rawCash end
+	local currentStr, requiredStr = string.match(text, "([%d%.,]+%s*%a*)%s*/%s*([%d%.,]+%s*%a*)")
+	if currentStr and requiredStr then
+		local current = parseNumber(currentStr)
+		local required = parseNumber(requiredStr)
+		if current and required and required > 0 then
+			return math.clamp((current / required) * 100, 0, 100)
 		end
-		if max > 0 then return math.clamp((current / max) * 100, 0, 100) end
 	end
 
-	local rawPercent = string.match(text, "(%d+%.?%d*)%%")
-	if rawPercent then return math.clamp(tonumber(rawPercent) or 0, 0, 100) end
+	local percent = string.match(text, "(%d+%.?%d*)%%")
+	if percent then return math.clamp(tonumber(percent) or 0, 0, 100) end
 	return 0
 end
 
-local function monitorText(key, pathParts)
-	task.spawn(function()
-		local activeConnection
-		local lastObj = nil
-		while running do
-			local obj = resolvePath(pathParts)
-			if obj then
-				if obj ~= lastObj then
-					if activeConnection then
-						activeConnection:Disconnect()
-						activeConnection = nil
-					end
-					lastObj = obj
-				end
-
-				local actualText
-				if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
-					actualText = obj.Text
-				elseif obj:IsA("StringValue") then
-					actualText = obj.Value
-				else
-					pcall(function() actualText = obj.Text end)
-				end
-
-				if actualText ~= nil then
-					trackedTexts[key] = tostring(actualText)
-					if not activeConnection then
-						local prop = obj:IsA("StringValue") and "Value" or "Text"
-						activeConnection = obj:GetPropertyChangedSignal(prop):Connect(function()
-							trackedTexts[key] = tostring(obj[prop])
-						end)
-					end
-				else
-					trackedTexts[key] = nil
-				end
-			else
-				if activeConnection then
-					activeConnection:Disconnect()
-					activeConnection = nil
-				end
-				lastObj = nil
-				trackedTexts[key] = nil
-			end
-			task.wait(CONFIG.Intervals.TextPoll)
-		end
-		if activeConnection then activeConnection:Disconnect() end
-	end)
-end
-
-for key, path in pairs(CONFIG.TrackedTexts) do
-	monitorText(key, path)
-end
-
--- GUI Setup
-local ScreenGui = new("ScreenGui", { Name = CONFIG.GuiName })
-ScreenGui.Parent = CoreGui
+-- GUI setup
+local ScreenGui = new("ScreenGui", { Name = CONFIG.GuiName, ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling })
+ScreenGui.Parent = guiParent
 
 local W = CONFIG.Window
 
@@ -316,7 +296,7 @@ addStroke(MainFrame, C.Stroke, 1.5)
 local Header = new("Frame", { Name = "Header", BackgroundColor3 = C.Header, Size = UDim2.new(1, 0, 0, W.HeaderHeight) }, MainFrame)
 addCorner(Header, 8)
 
-local Title = new("TextLabel", {
+new("TextLabel", {
 	Name = "Title", BackgroundTransparency = 1, Position = UDim2.new(0, 10, 0, 0), Size = UDim2.new(1, -70, 1, 0),
 	Font = CONFIG.Font, RichText = true, Text = "TBOD^2 Manager [Stats & Auto Farm]",
 	TextColor3 = C.Text, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left,
@@ -335,6 +315,8 @@ local CloseBtn = new("TextButton", {
 CloseBtn.MouseButton1Click:Connect(function()
 	if env.TycoonManagerCleanup then
 		env.TycoonManagerCleanup()
+	elseif env.TBODManagerCleanup then
+		env.TBODManagerCleanup()
 	else
 		ScreenGui:Destroy()
 	end
@@ -355,53 +337,54 @@ local function makeButton(parent, name, text, bg)
 	return btn
 end
 
-local function makeListPanel(name, height, scrolling)
+local function makeListPanel(name, scrolling)
 	local props = {
 		Name = name, BackgroundTransparency = 1, Position = UDim2.new(0, 10, 0, W.PanelY),
-		Size = UDim2.new(1, -20, 0, height), Visible = false,
+		Size = UDim2.new(1, -20, 1, -(W.PanelY + 5)), Visible = false,
 	}
 	if scrolling then
-		props.Size = UDim2.new(1, -20, 1, -(W.PanelY + W.PanelPadding))
 		props.BorderSizePixel = 0
 		props.CanvasSize = UDim2.new(0, 0, 0, 0)
 		props.ScrollBarThickness = 4
 		props.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	else
+		props.Size = UDim2.new(1, 0, 0, 285)
 	end
 	local panel = new(scrolling and "ScrollingFrame" or "Frame", props, MainFrame)
 	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 5) }, panel)
 	return panel
 end
 
--- Stats Panel
+-- Stats panel
 local PanelStats = new("Frame", {
 	Name = "PanelStats", BackgroundTransparency = 1, Position = UDim2.new(0, 0, 0, W.PanelY),
-	Size = UDim2.new(1, 0, 0, 170), Visible = true,
+	Size = UDim2.new(1, 0, 0, 285), Visible = true,
 }, MainFrame)
 
 local StatsLabel = new("TextLabel", {
-	Name = "StatsLabel", BackgroundTransparency = 1, Position = UDim2.new(0, 10, 0, 0), Size = UDim2.new(1, -20, 0, 45),
-	Font = CONFIG.Font, Text = "Stats:\nCash: $0\nPlot: Searching...", TextColor3 = C.On, TextSize = 14,
+	Name = "StatsLabel", BackgroundTransparency = 1, Position = UDim2.new(0, 10, 0, 0), Size = UDim2.new(1, -20, 0, 78),
+	Font = CONFIG.Font, Text = "Stats:\nCash: $0\nPlot: Searching...\nEssence Capped: False\nBit Generator: --:--", TextColor3 = C.On, TextSize = 13,
 	TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
 }, PanelStats)
 
 local RebirthContentFrame = new("Frame", {
-	Name = "RebirthContentFrame", BackgroundTransparency = 1, Position = UDim2.new(0, 0, 0, 50), Size = UDim2.new(1, 0, 0, 115),
+	Name = "RebirthContentFrame", BackgroundTransparency = 1, Position = UDim2.new(0, 0, 0, 84), Size = UDim2.new(1, 0, 0, 84),
 }, PanelStats)
 
 local function statLabel(name, y, height, text, color, size)
 	return new("TextLabel", {
 		Name = name, BackgroundTransparency = 1, Position = UDim2.new(0, 10, 0, y), Size = UDim2.new(1, -20, 0, height),
 		Font = CONFIG.Font, Text = text, TextColor3 = color, TextSize = size, TextWrapped = size <= 14,
+		TextXAlignment = Enum.TextXAlignment.Left,
 	}, RebirthContentFrame)
 end
 
-local PercentLabel      = statLabel("PercentLabel", 2, 18, "0%", C.Text, 16)
-local RebirthLabel      = statLabel("RebirthLabel", 36, 16, "Progress: Loading...", C.TextMuted, 14)
-local CappedStatusLabel = statLabel("CappedStatusLabel", 54, 16, "Capped: Loading...", C.TextMuted, 14)
-local NumbersLabel      = statLabel("NumbersLabel", 72, 32, "Numbers: Loading...", C.TextMuted, 14)
+local PercentLabel      = statLabel("PercentLabel", 0, 18, "0%", C.Text, 16)
+local RebirthLabel      = statLabel("RebirthLabel", 34, 16, "Progress: Loading...", C.TextMuted, 14)
+local CappedStatusLabel = statLabel("CappedStatusLabel", 52, 16, "Capped: Loading...", C.TextMuted, 14)
 
 local ProgressBarBg = new("Frame", {
-	Name = "ProgressBarBg", BackgroundColor3 = C.Panel, BorderSizePixel = 0, Position = UDim2.new(0, 10, 0, 22),
+	Name = "ProgressBarBg", BackgroundColor3 = C.Panel, BorderSizePixel = 0, Position = UDim2.new(0, 10, 0, 20),
 	Size = UDim2.new(1, -20, 0, 10), ClipsDescendants = true,
 }, RebirthContentFrame)
 addCorner(ProgressBarBg, 6)
@@ -411,7 +394,7 @@ local ProgressBarFill = new("Frame", {
 }, ProgressBarBg)
 addCorner(ProgressBarFill, 6)
 
-local UIGradient = new("UIGradient", {
+local ProgressGradient = new("UIGradient", {
 	Color = ColorSequence.new({
 		ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 0, 0)),
 		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 0)),
@@ -419,28 +402,48 @@ local UIGradient = new("UIGradient", {
 	}),
 }, ProgressBarFill)
 
-local MerchantsListFrame = new("Frame", {
-	Name = "MerchantsListFrame", BackgroundTransparency = 1, Size = UDim2.new(1, -20, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-	Position = UDim2.new(0, 10, 0, 155),
+local MerchantsListFrame = new("ScrollingFrame", {
+	Name = "MerchantsListFrame", BackgroundTransparency = 1, Size = UDim2.new(1, -20, 0, 116),
+	Position = UDim2.new(0, 10, 0, 168), CanvasSize = UDim2.new(0, 0, 0, 0),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 2, BorderSizePixel = 0,
 }, PanelStats)
 new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3) }, MerchantsListFrame)
-local merchantListButtons = {}
+local merchantButtons = {}
 
--- Auto Farm Panel
-local PanelAutoFarm = makeListPanel("PanelAutoFarm", 200, true)
+-- Auto farm panel
+local PanelAutoFarm = makeListPanel("PanelAutoFarm", true)
 local AutoBuyToggleBtn     = makeButton(PanelAutoFarm, "AutoBuyToggleBtn", "Auto Buy: OFF", C.Panel)
-local MoveModeBtn          = makeButton(PanelAutoFarm, "MoveModeBtn", CONFIG.BuyModes[State.buyModeIndex].text, (CONFIG.BuyModes[State.buyModeIndex].id == "Remote" and C.On) or C.Panel)
+local MoveModeBtn          = makeButton(PanelAutoFarm, "MoveModeBtn", CONFIG.BuyModes[State.buyModeIndex].text,
+	(CONFIG.BuyModes[State.buyModeIndex].id == "Remote" and C.On) or C.Panel)
 local AutoRebirthToggleBtn = makeButton(PanelAutoFarm, "AutoRebirthToggleBtn", "Auto Rebirth: OFF", C.Panel)
-local RebirthModeBtn       = makeButton(PanelAutoFarm, "RebirthModeBtn", CONFIG.Rebirth.Modes[State.rebirthModeIndex].text, C.Panel)
+local EssenceCapToggleBtn  = makeButton(PanelAutoFarm, "EssenceCapToggleBtn", "Essence Cap: ON", C.On)
 local BeamToggleBtn        = makeButton(PanelAutoFarm, "BeamToggleBtn", "Guidelines: OFF", C.Panel)
 local MerchantLocatorBtn   = makeButton(PanelAutoFarm, "MerchantLocatorBtn", "Merchant Locator: OFF", C.Panel)
 local AutoPickToggleBtn    = makeButton(PanelAutoFarm, "AutoPickToggleBtn", "Auto Bits: OFF", C.Panel)
 local AntiAfkToggleBtn     = makeButton(PanelAutoFarm, "AntiAfkToggleBtn", "Anti-AFK: OFF", C.Panel)
 local ManualRebirthBtn     = makeButton(PanelAutoFarm, "ManualRebirthBtn", "Open Rebirth GUI", C.Panel)
 
--- Tab management
-local panels = { Stats = PanelStats, ["Auto Farm"] = PanelAutoFarm }
-local tabOrder = { "Stats", "Auto Farm" }
+local StatusLabel = new("TextLabel", {
+	Name = "StatusLabel", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 20),
+	Font = CONFIG.Font, Text = "Status: idle", TextColor3 = C.TextDim, TextSize = 13,
+	TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+}, PanelAutoFarm)
+
+-- Misc panel
+local PanelMisc = makeListPanel("PanelMisc", true)
+
+new("TextLabel", {
+	Name = "MiscInfo", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 40),
+	Font = CONFIG.Font, Text = "Extra tools:", TextColor3 = C.TextDim, TextSize = 13,
+	TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true,
+}, PanelMisc)
+
+local LoadTelekinesisBtn = makeButton(PanelMisc, "LoadTelekinesisBtn", "Telekinesis", C.Panel)
+local InventoryToggleBtn = makeButton(PanelMisc, "InventoryToggleBtn", "Inventory: ON", C.On)
+
+-- Tabs
+local panels = { Stats = PanelStats, ["Auto Farm"] = PanelAutoFarm, Misc = PanelMisc }
+local tabOrder = { "Stats", "Auto Farm", "Misc" }
 local tabButtons = {}
 
 local function refreshTabs()
@@ -455,7 +458,10 @@ local function refreshTabs()
 end
 
 for _, name in ipairs(tabOrder) do
-	local btn = new("TextButton", { Name = name .. "Tab", Size = UDim2.new(0, 100, 1, 0), Font = CONFIG.Font, Text = name, TextSize = 14 }, CategoryBar)
+	local btn = new("TextButton", {
+		Name = name .. "Tab", Size = UDim2.new(0, 100, 1, 0), Font = CONFIG.Font,
+		Text = name, TextSize = 14, BackgroundColor3 = C.Panel,
+	}, CategoryBar)
 	addCorner(btn, 6)
 	addStroke(btn, C.Stroke, 1)
 	tabButtons[name] = btn
@@ -478,6 +484,7 @@ end
 bindToggle(BeamToggleBtn, "Guidelines", "beamsEnabled", C.On)
 bindToggle(AutoBuyToggleBtn, "Auto Buy", "autoBuyEnabled", C.On)
 bindToggle(AutoRebirthToggleBtn, "Auto Rebirth", "autoRebirthEnabled", C.On)
+bindToggle(EssenceCapToggleBtn, "Essence Cap", "essenceCapEnabled", C.On)
 bindToggle(AutoPickToggleBtn, "Auto Bits", "autoPickCardEnabled", C.On)
 bindToggle(MerchantLocatorBtn, "Merchant Locator", "merchantLocatorEnabled", C.On)
 bindToggle(AntiAfkToggleBtn, "Anti-AFK", "antiAfkEnabled", C.On)
@@ -487,11 +494,6 @@ MoveModeBtn.MouseButton1Click:Connect(function()
 	local mode = CONFIG.BuyModes[State.buyModeIndex]
 	MoveModeBtn.Text = mode.text
 	MoveModeBtn.BackgroundColor3 = (mode.id == "Remote" and C.On) or (mode.id == "Pathfind" and C.Accent) or C.Panel
-end)
-
-RebirthModeBtn.MouseButton1Click:Connect(function()
-	State.rebirthModeIndex = State.rebirthModeIndex % #CONFIG.Rebirth.Modes + 1
-	RebirthModeBtn.Text = CONFIG.Rebirth.Modes[State.rebirthModeIndex].text
 end)
 
 -- Window dragging & minimize
@@ -535,185 +537,241 @@ local function getPlayerGui()
 	return localPlayer:FindFirstChild("PlayerGui")
 end
 
-local function getMyPlot()
-	local plots = Workspace:FindFirstChild("Plots")
-	if not plots then return "None" end
-	local myName, myDisplay = string.lower(localPlayer.Name), string.lower(localPlayer.DisplayName)
-	for _, plot in ipairs(plots:GetChildren()) do
-		local sign = plot:FindFirstChild("SignPlace")
-		local nameLabel = sign and sign:FindFirstChild("DefaultSign")
-		nameLabel = nameLabel and nameLabel:FindFirstChild("Screen")
-		nameLabel = nameLabel and nameLabel:FindFirstChild("SurfaceGui")
-		nameLabel = nameLabel and nameLabel:FindFirstChild("NameLabel")
-		if nameLabel and nameLabel:IsA("TextLabel") then
-			local text = string.lower(nameLabel.Text)
-			if text == myName or text == myDisplay then return plot.Name end
-		end
-	end
-	return "None"
-end
-
+local tycoonCache = { time = 0, obj = nil }
 local function getMyTycoon()
+	local cached = tycoonCache.obj
+	if cached and cached.Parent and tick() - tycoonCache.time < 2 then
+		return cached
+	end
+
 	local tycoons = Workspace:FindFirstChild("Tycoons")
 	if not tycoons then return nil end
 
 	for _, tycoon in ipairs(tycoons:GetChildren()) do
-		local ownerId = tycoon:GetAttribute("OwnerId")
-		if ownerId == localPlayer.UserId then
+		if tycoon:GetAttribute("OwnerId") == localPlayer.UserId then
+			tycoonCache = { time = tick(), obj = tycoon }
 			return tycoon
 		end
 	end
+	return nil
+end
 
-	local myPlotName = getMyPlot()
-	if myPlotName == "None" then return nil end
+local function getMyPlot()
+	local tycoon = getMyTycoon()
 	local plots = Workspace:FindFirstChild("Plots")
-	local plotObj = plots and plots:FindFirstChild(myPlotName)
-	if not plotObj then return nil end
+	if not tycoon or not plots then return nil end
 
-	local function positionOf(obj)
-		if obj:IsA("Model") then return obj:GetPivot().Position end
-		local part = obj:FindFirstChildWhichIsA("BasePart")
-		return part and part.Position
-	end
-
-	local plotPos = positionOf(plotObj)
-	if not plotPos then return nil end
+	local base = tycoon:FindFirstChild("Base") or tycoon:FindFirstChild("SpawnPart")
+	if not (base and base:IsA("BasePart")) then return nil end
 
 	local closest, shortest = nil, math.huge
-	for _, tycoon in ipairs(tycoons:GetChildren()) do
-		if tycoon:FindFirstChild("Buttons") then
-			local pivot = positionOf(tycoon)
-			if pivot then
-				local dist = (plotPos - pivot).Magnitude
-				if dist < shortest then
-					shortest, closest = dist, tycoon
-				end
+	for _, plot in ipairs(plots:GetChildren()) do
+		local origin = plot:FindFirstChild("BuildOrigin")
+		if origin and origin:IsA("BasePart") then
+			local distance = (origin.Position - base.Position).Magnitude
+			if distance < shortest then
+				shortest, closest = distance, plot
 			end
 		end
 	end
-	return closest
+	if closest and shortest <= 8 then return closest, closest.Name end
+	return nil
 end
 
-local function getPlotSpawnCFrame(plotObj)
-	local offset = Vector3.new(0, CONFIG.Rebirth.PlotSpawnOffset, 0)
-	local spawnPad = plotObj:FindFirstChild("Spawn") or plotObj:FindFirstChild("SpawnLocation") or plotObj:FindFirstChild("ClaimPart")
-	if spawnPad and spawnPad:IsA("BasePart") then return spawnPad.CFrame + offset end
-	return plotObj:GetPivot() + offset
-end
-
-local essenceCache = { time = 0, value = false }
-local function isEssenceCapped()
+local cashCache = { time = 0, num = 0, str = "$0" }
+local function getPlayerCash(force)
 	local now = tick()
-	if now - essenceCache.time < CONFIG.Rebirth.EssenceScanCache then return essenceCache.value end
-	local phrase = CONFIG.Rebirth.EssencePhrase
-	local tracked = trackedTexts["EssenceCappedTemp"]
-	local capped = tracked ~= nil and string.find(string.lower(tracked), phrase, 1, true) ~= nil
-	if not capped then
-		local pGui = getPlayerGui()
-		if pGui then
-			for _, v in ipairs(pGui:GetDescendants()) do
-				if (v:IsA("TextLabel") or v:IsA("TextButton")) and v.Visible and string.find(string.lower(tostring(v.Text or "")), phrase, 1, true) then
-					capped = true
-					break
-				end
-			end
-		end
+	if not force and now - cashCache.time < 0.12 then
+		return cashCache.num, cashCache.str
 	end
-	essenceCache.time, essenceCache.value = now, capped
-	return capped
-end
 
-local function getPlayerCash()
 	local playerGui = getPlayerGui()
 	if playerGui then
 		local system = playerGui:FindFirstChild("System")
 		local main = system and system:FindFirstChild("Main")
 		local cashFrame = main and main:FindFirstChild("Cash")
-		local cashTextLabel = cashFrame and cashFrame:FindFirstChild("CashText")
-		if cashTextLabel and cashTextLabel:IsA("TextLabel") and cashTextLabel.Text ~= "" then
-			local parsed = parsePrice(cashTextLabel.Text)
-			if parsed then return parsed, cashTextLabel.Text end
+		local cashLabel = cashFrame and cashFrame:FindFirstChild("CashText")
+		if cashLabel and cashLabel:IsA("TextLabel") and cashLabel.Text ~= "" then
+			local parsed = parseNumber(cashLabel.Text)
+			if parsed then
+				cashCache = { time = now, num = parsed, str = cashLabel.Text }
+				return parsed, cashLabel.Text
+			end
 		end
 
 		local playerList = system and system:FindFirstChild("PlayerList")
 		local holder = playerList and playerList:FindFirstChild("Holder")
 		local myFrame = holder and holder:FindFirstChild(localPlayer.Name)
-		if myFrame then
-			for _, desc in ipairs(myFrame:GetDescendants()) do
-				if desc:IsA("TextLabel") and desc.Text ~= "" then
-					local parsed = parsePrice(desc.Text)
-					if parsed and parsed > 0 then return parsed, desc.Text end
-				end
+		local myCash = myFrame and myFrame:FindFirstChild("CashText")
+		if myCash and myCash:IsA("TextLabel") and myCash.Text ~= "" then
+			local parsed = parseNumber(myCash.Text)
+			if parsed then
+				cashCache = { time = now, num = parsed, str = myCash.Text }
+				return parsed, myCash.Text
 			end
 		end
 	end
 
-	local leaderstats = localPlayer:FindFirstChild("leaderstats") or localPlayer:FindFirstChild("stats")
-	if leaderstats then
-		local cashObj = leaderstats:FindFirstChild("Cash") or leaderstats:FindFirstChild("Money") or leaderstats:FindFirstChild("Coins")
-		if cashObj and cashObj:IsA("ValueBase") then
-			local val = tonumber(cashObj.Value) or 0
-			return val, "$" .. formatNumber(val)
+	return 0, "$0"
+end
+
+local function getProgressText()
+	local playerGui = getPlayerGui()
+	local system = playerGui and playerGui:FindFirstChild("System")
+	local holder = system and system:FindFirstChild("RebirthProgress")
+	local progress = holder and holder:FindFirstChild("Progress")
+	local label = progress and progress:FindFirstChild("TextLabel")
+	if label and label:IsA("TextLabel") then return label.Text end
+	return ""
+end
+
+local function getBitsGeneratorTime()
+	local playerGui = getPlayerGui()
+	local system = playerGui and playerGui:FindFirstChild("System")
+	local bitsGenerator = system and system:FindFirstChild("BitsGenerator")
+	local holder = bitsGenerator and bitsGenerator:FindFirstChild("Holder")
+	local output = holder and holder:FindFirstChild("Output")
+	local stats = output and output:FindFirstChild("Stats")
+	local timeLabel = stats and stats:FindFirstChild("Time")
+	if timeLabel and timeLabel:IsA("TextLabel") and timeLabel.Text ~= "" then
+		return timeLabel.Text
+	end
+	return "--:--"
+end
+
+local function getRebirthCount()
+	local playerGui = getPlayerGui()
+	local system = playerGui and playerGui:FindFirstChild("System")
+	if not system then return nil end
+
+	local main = system:FindFirstChild("Main")
+	local rebirths = main and main:FindFirstChild("Rebirths")
+	if rebirths then
+		local number = rebirths:FindFirstChild("Number")
+		if number and number:IsA("TextLabel") then
+			local digits = string.match(number.Text, "%((%d+)%)") or string.match(number.Text, "(%d+)")
+			if digits then return tonumber(digits) end
+		end
+		local numeral = rebirths:FindFirstChild("Numeral")
+		if numeral and numeral:IsA("TextLabel") then
+			local parsed = romanToNumber(numeral.Text)
+			if parsed then return parsed end
 		end
 	end
-	return 0, "$0"
+
+	local playerList = system:FindFirstChild("PlayerList")
+	local holder = playerList and playerList:FindFirstChild("Holder")
+	local myFrame = holder and holder:FindFirstChild(localPlayer.Name)
+	local rebsText = myFrame and myFrame:FindFirstChild("RebsText")
+	if rebsText and rebsText:IsA("TextLabel") then
+		return romanToNumber(rebsText.Text)
+	end
+	return nil
+end
+
+local function hasRebirthNotification()
+	local playerGui = getPlayerGui()
+	local system = playerGui and playerGui:FindFirstChild("System")
+	local notifications = system and system:FindFirstChild("Notifications")
+	local holder = notifications and notifications:FindFirstChild("NotiHolder")
+	return holder ~= nil and holder:FindFirstChild("RebirthNotification") ~= nil
+end
+
+local essenceCache = { time = 0, value = false }
+local function isEssenceCapped()
+	local now = tick()
+	if now - essenceCache.time < 0.1 then return essenceCache.value end
+
+	local capped = false
+	local playerGui = getPlayerGui()
+	local system = playerGui and playerGui:FindFirstChild("System")
+	local notifications = system and system:FindFirstChild("Notifications")
+	local holder = notifications and notifications:FindFirstChild("NotiHolder")
+
+	-- Only the real "Your essence is capped!" notification counts.
+	local noti = holder and holder:FindFirstChild("EssenceCappedTemp")
+	if noti then
+		local pos = noti:FindFirstChild("Pos")
+		local textObj = (pos and pos:FindFirstChild("Text")) or noti:FindFirstChild("Text")
+		if textObj and textObj:IsA("TextLabel") then
+			capped = string.find(string.lower(textObj.Text), CONFIG.Rebirth.EssencePhrase, 1, true) ~= nil
+		else
+			capped = true
+		end
+	end
+
+	essenceCache.time, essenceCache.value = now, capped
+	return capped
 end
 
 local function isButtonActive(btn)
 	if not btn or not btn.Parent then return false end
-	if btn:IsA("BasePart") and (btn.Transparency >= 1 or not btn.CanCollide) then return false end
-	local head = btn:FindFirstChild("Head") or btn:FindFirstChild("Part") or btn:FindFirstChildWhichIsA("BasePart")
-	if head and (head.Transparency >= 1 or not head.CanCollide) then return false end
-	local billboard = btn:FindFirstChildWhichIsA("BillboardGui", true)
-	if billboard and not billboard.Enabled then return false end
+	if btn:IsA("BasePart") then
+		-- Sold buttons stay in the folder but are made invisible and non-collidable.
+		if btn.Transparency >= 1 or not btn.CanCollide then return false end
+	end
 	return true
 end
 
 local function getTargetPosition(target)
 	if target:IsA("BasePart") then return target.Position end
 	if target:IsA("Model") then
-		local head = target:FindFirstChild("Head") or target:FindFirstChild("Part") or target:FindFirstChildWhichIsA("BasePart")
-		return head and head.Position or target:GetPivot().Position
+		local part = target:FindFirstChild("Head") or target:FindFirstChild("Part") or target:FindFirstChildWhichIsA("BasePart")
+		return part and part.Position or target:GetPivot().Position
 	end
 	return nil
 end
 
+local buttonCache = setmetatable({}, { __mode = "k" })
 local function getButtonDetails(btn)
-	if not btn or not isButtonActive(btn) then return nil, nil, nil end
-	local priceNum, priceStr, buttonName = nil, nil, btn.Name
-	local nameDisplay = btn:FindFirstChild("NameDisplay", true)
-	if nameDisplay then
-		local textLabel = nameDisplay:FindFirstChildWhichIsA("TextLabel", true) or (nameDisplay:IsA("TextLabel") and nameDisplay)
-		if textLabel and textLabel.Text ~= "" and textLabel.Visible then buttonName = textLabel.Text end
+	if not isButtonActive(btn) then return nil end
+
+	local priceDisplay = btn:FindFirstChild("PriceDisplay")
+	local priceLabel = priceDisplay and priceDisplay:FindFirstChildWhichIsA("TextLabel", true)
+	local nameDisplay = btn:FindFirstChild("NameDisplay")
+	local nameLabel = nameDisplay and nameDisplay:FindFirstChildWhichIsA("TextLabel", true)
+
+	local priceText = priceLabel and priceLabel.Text or ""
+	local buttonName = (nameLabel and nameLabel.Text ~= "" and nameLabel.Text) or btn.Name
+
+	local cached = buttonCache[btn]
+	if cached and cached.priceText == priceText and cached.name == buttonName then
+		return cached.price, cached.priceText, cached.name
 	end
-	local priceDisplay = btn:FindFirstChild("PriceDisplay", true)
-	if priceDisplay then
-		local textLabel = priceDisplay:FindFirstChildWhichIsA("TextLabel", true) or (priceDisplay:IsA("TextLabel") and priceDisplay)
-		if textLabel and textLabel.Text ~= "" and textLabel.Visible then
-			priceNum = parsePrice(textLabel.Text)
-			priceStr = textLabel.Text
-		end
-	end
-	if not priceNum then
+
+	local price = parseNumber(priceText)
+	if not price then
 		for _, desc in ipairs(btn:GetDescendants()) do
-			if desc:IsA("TextLabel") and desc.Text ~= "" and desc.Visible then
-				local parsed = parsePrice(desc.Text)
-				if parsed then priceNum = parsed; priceStr = desc.Text; break end
+			if desc:IsA("TextLabel") and desc.Text ~= "" then
+				local parsed = parseNumber(desc.Text)
+				if parsed then
+					price, priceText = parsed, desc.Text
+					break
+				end
 			end
 		end
 	end
-	if not priceNum and buttonName:lower():find("free") then priceNum, priceStr = 0, "Free" end
-	return priceNum, priceStr, buttonName
+	if not price and string.find(string.lower(buttonName), "free", 1, true) then
+		price, priceText = 0, "Free"
+	end
+	if not price then return nil end
+
+	buttonCache[btn] = { price = price, priceText = priceText, name = buttonName }
+	return price, priceText, buttonName
 end
 
--- Movement & Auto Buy
-local activePathTask
+-- Movement
+local pathToken = 0
 
 local function cancelPath()
-	if activePathTask then
-		task.cancel(activePathTask)
-		activePathTask = nil
-	end
+	pathToken = pathToken + 1
+end
+
+local function touchPart(root, part)
+	if not root or not part then return end
+	pcall(firetouchinterest, root, part, 1)
+	task.wait(0.02)
+	pcall(firetouchinterest, root, part, 0)
 end
 
 local function moveToTarget(target)
@@ -726,41 +784,36 @@ local function moveToTarget(target)
 	if not targetPos then return end
 
 	cancelPath()
+	local myToken = pathToken
 
 	local modeId = CONFIG.BuyModes[State.buyModeIndex].id
 	if modeId == "Remote" then
-		local btnPart = target:IsA("BasePart") and target
-			or target:FindFirstChild("Head")
-			or target:FindFirstChild("Part")
-			or target:FindFirstChildWhichIsA("BasePart")
-		if btnPart and firetouchinterest then
-			firetouchinterest(root, btnPart, 0)
-			task.wait(0.02)
-			firetouchinterest(root, btnPart, 1)
+		local part = target:IsA("BasePart") and target or target:FindFirstChildWhichIsA("BasePart")
+		if part then
+			touchPart(root, part)
 		else
-			pcall(function()
-				root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
-			end)
+			pcall(function() root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0)) end)
 		end
 		return
 	elseif modeId == "Teleport" then
-		pcall(function()
-			root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
-		end)
+		pcall(function() root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0)) end)
 		return
 	end
 
-	local P = CONFIG.Pathfinding
-	activePathTask = task.spawn(function()
+	task.spawn(function()
+		local P = CONFIG.Pathfinding
 		local path = PathfindingService:CreatePath({
 			AgentRadius = P.AgentRadius, AgentHeight = P.AgentHeight, AgentCanJump = P.AgentCanJump,
 			AgentCanClimb = P.AgentCanClimb, WaypointSpacing = P.WaypointSpacing,
 			Costs = { Water = P.WaterCost, Danger = math.huge },
 		})
 		local startedAt, lastJump = tick(), 0
+
 		local function aborted()
-			return not root.Parent or humanoid.Health <= 0 or not target.Parent or not isButtonActive(target)
+			return not running or myToken ~= pathToken or not root.Parent
+				or humanoid.Health <= 0 or not target.Parent or not isButtonActive(target)
 		end
+
 		local function jumpIfHigher()
 			local pos = getTargetPosition(target)
 			if pos and pos.Y - root.Position.Y > P.JumpHeightThreshold and tick() - lastJump >= P.JumpInterval then
@@ -768,6 +821,7 @@ local function moveToTarget(target)
 				humanoid.Jump = true
 			end
 		end
+
 		local function fallbackTeleport()
 			if tick() - startedAt < P.FallbackSeconds then return false end
 			local pos = getTargetPosition(target)
@@ -777,58 +831,63 @@ local function moveToTarget(target)
 			return true
 		end
 
-		while true do
-			if aborted() or fallbackTeleport() then return end
+		while not aborted() do
+			if fallbackTeleport() then return end
 			targetPos = getTargetPosition(target)
 			if not targetPos then return end
 			jumpIfHigher()
+
 			if (root.Position - targetPos).Magnitude <= P.ReachDistance then
 				humanoid:MoveTo(targetPos)
 				task.wait(0.35)
-				continue
-			end
-			local ok = pcall(function() path:ComputeAsync(root.Position, targetPos) end)
-			if not ok or path.Status ~= Enum.PathStatus.Success then
-				humanoid:MoveTo(targetPos)
-				task.wait(0.45)
-				continue
-			end
-			local waypoints = path:GetWaypoints()
-			if #waypoints < 2 then
-				humanoid:MoveTo(targetPos)
-				task.wait(0.3)
-				continue
-			end
-			for i = 2, #waypoints do
-				if aborted() or fallbackTeleport() then return end
-				local wpPos = waypoints[i].Position
-				targetPos = getTargetPosition(target)
-				if not targetPos then return end
-				if (root.Position - targetPos).Magnitude <= P.ReachDistance then break end
-				humanoid:MoveTo(wpPos)
-				local startTime = tick()
-				local stuckCheck, stuckTimer = root.Position, 0
-				while (root.Position - wpPos).Magnitude > P.WaypointReach do
-					if aborted() or fallbackTeleport() then return end
-					targetPos = getTargetPosition(target)
-					if targetPos and (root.Position - targetPos).Magnitude <= P.ReachDistance then break end
-					if tick() - startTime > P.WaypointTimeout then break end
-					jumpIfHigher()
-					if (root.Position - stuckCheck).Magnitude < P.StuckDistance then
-						stuckTimer += 0.08
-						if stuckTimer > P.StuckTime then
-							local away = root.Position - wpPos
-							if away.Magnitude < 0.1 then away = Vector3.new(math.random(-1, 1), 0, math.random(-1, 1)) end
-							root.CFrame = root.CFrame + (away.Unit * P.StuckPush) + Vector3.new(0, P.StuckLift, 0)
-							stuckTimer = 0
-							stuckCheck = root.Position
-							task.wait(0.1)
-						end
+			else
+				local ok = pcall(function() path:ComputeAsync(root.Position, targetPos) end)
+				if not ok or path.Status ~= Enum.PathStatus.Success then
+					humanoid:MoveTo(targetPos)
+					task.wait(0.45)
+				else
+					local waypoints = path:GetWaypoints()
+					if #waypoints < 2 then
+						humanoid:MoveTo(targetPos)
+						task.wait(0.3)
 					else
-						stuckTimer = 0
-						stuckCheck = root.Position
+						for i = 2, #waypoints do
+							if aborted() then return end
+							local waypointPos = waypoints[i].Position
+							targetPos = getTargetPosition(target)
+							if not targetPos then return end
+							if (root.Position - targetPos).Magnitude <= P.ReachDistance then break end
+
+							humanoid:MoveTo(waypointPos)
+							local startTime = tick()
+							local lastPos, stuckTimer = root.Position, 0
+							while (root.Position - waypointPos).Magnitude > P.WaypointReach do
+								if aborted() or fallbackTeleport() then return end
+								targetPos = getTargetPosition(target)
+								if targetPos and (root.Position - targetPos).Magnitude <= P.ReachDistance then break end
+								if tick() - startTime > P.WaypointTimeout then break end
+								jumpIfHigher()
+
+								if (root.Position - lastPos).Magnitude < P.StuckDistance then
+									stuckTimer = stuckTimer + 0.08
+									if stuckTimer > P.StuckTime then
+										local away = root.Position - waypointPos
+										if away.Magnitude < 0.1 then
+											away = Vector3.new(math.random(-1, 1), 0, math.random(-1, 1))
+										end
+										root.CFrame = root.CFrame + (away.Unit * P.StuckPush) + Vector3.new(0, P.StuckLift, 0)
+										stuckTimer = 0
+										lastPos = root.Position
+										task.wait(0.1)
+									end
+								else
+									stuckTimer = 0
+									lastPos = root.Position
+								end
+								task.wait(0.07)
+							end
+						end
 					end
-					task.wait(0.07)
 				end
 			end
 			task.wait(0.12)
@@ -836,7 +895,7 @@ local function moveToTarget(target)
 	end)
 end
 
--- Guidelines & Beams
+-- Beams
 local beams = {}
 local merchantBeams = {}
 
@@ -859,8 +918,17 @@ local function clearGuidelines()
 	clearBeams(beams)
 end
 
+local function beamValid(data, root)
+	return data
+		and data.root == root
+		and data.att0.Parent ~= nil
+		and data.att1.Parent ~= nil
+		and data.beam.Parent ~= nil
+end
+
 local function ensureBeam(set, key, root, targetPart, color)
-	if set[key] then return end
+	if beamValid(set[key], root) then return end
+	if set[key] then destroyBeam(set, key) end
 	local G = CONFIG.Guidelines
 	local att0 = Instance.new("Attachment", root)
 	local att1 = Instance.new("Attachment", targetPart)
@@ -868,39 +936,51 @@ local function ensureBeam(set, key, root, targetPart, color)
 		Attachment0 = att0, Attachment1 = att1, Color = ColorSequence.new(color or G.Color),
 		Width0 = G.Width, Width1 = G.Width, Texture = G.Texture, TextureMode = Enum.TextureMode.Wrap,
 		TextureSpeed = G.TextureSpeed, TextureLength = G.TextureLength, FaceCamera = true,
-		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 0.1) }),
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.1),
+			NumberSequenceKeypoint.new(0.5, 0),
+			NumberSequenceKeypoint.new(1, 0.1),
+		}),
 	}, root)
-	set[key] = { beam = beam, att0 = att0, att1 = att1 }
+	set[key] = { beam = beam, att0 = att0, att1 = att1, root = root }
 end
 
-local function updateGuidelines(validButtons)
-	if not State.beamsEnabled then return clearGuidelines() end
+local function updateGuidelines(allItems)
+	if not State.beamsEnabled then
+		clearGuidelines()
+		return
+	end
+
 	local character = localPlayer.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart")
-	if not root then return clearGuidelines() end
+	if not root then
+		clearGuidelines()
+		return
+	end
+
 	local G = CONFIG.Guidelines
-	local currentValid = {}
-	for _, item in ipairs(validButtons) do
+	local valid = {}
+	for _, item in ipairs(allItems) do
 		if item.canAfford then
 			local btn = item.instance
-			currentValid[btn] = true
-			local targetPart = btn:IsA("BasePart") and btn
-				or (btn:IsA("Model") and (btn:FindFirstChild("Head") or btn:FindFirstChild("Part") or btn:FindFirstChildWhichIsA("BasePart") or btn.PrimaryPart))
-			if targetPart then
-				if (root.Position - targetPart.Position).Magnitude <= G.MaxDistance then
-					ensureBeam(beams, btn, root, targetPart)
+			valid[btn] = true
+			local part = btn:IsA("BasePart") and btn or btn:FindFirstChildWhichIsA("BasePart")
+			if part then
+				if (root.Position - part.Position).Magnitude <= G.MaxDistance then
+					ensureBeam(beams, btn, root, part)
 				else
 					destroyBeam(beams, btn)
 				end
 			end
 		end
 	end
+
 	for btn in pairs(beams) do
-		if not currentValid[btn] then destroyBeam(beams, btn) end
+		if not valid[btn] then destroyBeam(beams, btn) end
 	end
 end
 
--- Merchant Locator & Auto Bits
+-- Merchant locator & cards
 local function getMerchantPart(shop)
 	local merchant = shop:FindFirstChild("Merchant")
 	if not merchant then return nil end
@@ -908,17 +988,28 @@ local function getMerchantPart(shop)
 	if merchant:IsA("Model") then
 		local inner = merchant:FindFirstChild("Merchant")
 		if inner and inner:IsA("BasePart") then return inner end
-		if inner and inner:IsA("Model") then return inner.PrimaryPart or inner:FindFirstChildWhichIsA("BasePart", true) end
+		if inner and inner:IsA("Model") then
+			return inner.PrimaryPart or inner:FindFirstChildWhichIsA("BasePart", true)
+		end
+		return merchant.PrimaryPart or merchant:FindFirstChildWhichIsA("BasePart", true)
 	end
 	return nil
 end
 
 local function updateMerchantLocator()
-	if not State.merchantLocatorEnabled then return clearBeams(merchantBeams) end
+	if not State.merchantLocatorEnabled then
+		clearBeams(merchantBeams)
+		return
+	end
+
 	local character = localPlayer.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart")
 	local bitsShops = Workspace:FindFirstChild("BitsShops")
-	if not root or not bitsShops then return clearBeams(merchantBeams) end
+	if not root or not bitsShops then
+		clearBeams(merchantBeams)
+		return
+	end
+
 	local M = CONFIG.MerchantLocator
 	local current = {}
 	for _, shop in ipairs(bitsShops:GetChildren()) do
@@ -928,462 +1019,473 @@ local function updateMerchantLocator()
 			ensureBeam(merchantBeams, part, root, part, M.Color)
 		end
 	end
+
 	for part in pairs(merchantBeams) do
 		if not current[part] then destroyBeam(merchantBeams, part) end
 	end
 end
 
 local function fireCardDetector(card)
-	local detector = card:FindFirstChildOfClass("ClickDetector") or card:FindFirstChild("ClickDetector", true)
+	local detector = card:FindFirstChild("ClickDetector", true) or card:FindFirstChildOfClass("ClickDetector")
 	if detector then
 		detector.MaxActivationDistance = math.huge
-		fireclickdetector(detector)
+		pcall(fireclickdetector, detector, 0, "mouseclick")
 	end
 end
 
-local function readCardTexts(card)
-	local surfaceGui = card:FindFirstChildWhichIsA("SurfaceGui", true)
-	if not surfaceGui then return "N/A", "N/A", nil end
-	local priceDisplay = surfaceGui:FindFirstChild("priceDisplay") or surfaceGui:FindFirstChild("oldpriceDisplay")
-	local bitsDisplay = surfaceGui:FindFirstChild("bitsDisplay") or surfaceGui:FindFirstChild("oldbitsDisplay")
-	local priceText, bitsText = "N/A", "N/A"
-	if priceDisplay and (priceDisplay:IsA("TextLabel") or priceDisplay:IsA("TextButton")) then priceText = priceDisplay.Text end
-	if bitsDisplay and (bitsDisplay:IsA("TextLabel") or bitsDisplay:IsA("TextButton")) then bitsText = bitsDisplay.Text end
-	return priceText, bitsText, bitsDisplay
+local function readCardInfo(card)
+	local bits = card:GetAttribute("Bits")
+	if type(bits) ~= "number" then
+		local surfaceGui = card:FindFirstChildWhichIsA("SurfaceGui", true)
+		local bitsDisplay = surfaceGui and surfaceGui:FindFirstChild("bitsDisplay")
+		bits = (bitsDisplay and parseNumber(bitsDisplay.Text)) or 0
+	end
+
+	local priceStr
+	if localPlayer:GetAttribute("BitDiscount") then
+		priceStr = card:GetAttribute("DiscountedPrice") or card:GetAttribute("FormattedPrice")
+	else
+		priceStr = card:GetAttribute("FormattedPrice") or card:GetAttribute("DiscountedPrice")
+	end
+
+	if not priceStr then
+		local surfaceGui = card:FindFirstChildWhichIsA("SurfaceGui", true)
+		local priceDisplay = surfaceGui and surfaceGui:FindFirstChild("priceDisplay")
+		priceStr = priceDisplay and priceDisplay.Text or "N/A"
+	end
+
+	return bits, tostring(priceStr), parseNumber(priceStr)
 end
 
 local function highlightMerchants()
-	local activeCards = {}
 	local bitsShops = Workspace:FindFirstChild("BitsShops")
+	local cardData = {}
+
 	if bitsShops then
 		for _, shop in ipairs(bitsShops:GetChildren()) do
 			local cardsFolder = shop:FindFirstChild("Cards")
 			if cardsFolder then
 				for _, card in ipairs(cardsFolder:GetChildren()) do
-					if card:IsA("Model") or card:IsA("BasePart") then table.insert(activeCards, card) end
+					if card:IsA("Model") or card:IsA("BasePart") then
+						local bits, priceStr = readCardInfo(card)
+						cardData[#cardData + 1] = { card = card, bits = bits, priceStr = priceStr }
+					end
 				end
 			end
 		end
 	end
 
-	local cardData = {}
-	for _, card in ipairs(activeCards) do
-		local priceText, bitsText, bitsDisplay = readCardTexts(card)
-		local bitsVal = 0
-		if bitsDisplay and (bitsDisplay:IsA("TextLabel") or bitsDisplay:IsA("TextButton")) then
-			bitsVal = parseSuffixValue(bitsDisplay.Text)
-		end
-		table.insert(cardData, { card = card, priceText = priceText, bitsText = bitsText, bitsVal = bitsVal })
-	end
-
-	table.sort(cardData, function(a, b) return a.bitsVal > b.bitsVal end)
+	table.sort(cardData, function(a, b) return a.bits > b.bits end)
 
 	if State.autoPickCardEnabled and #cardData >= CONFIG.AutoPickMinCards then
-		local bestCard = cardData[1]
-		if bestCard and bestCard.bitsVal > 0 then
-			fireCardDetector(bestCard.card)
+		local best = cardData[1]
+		if best and best.bits > 0 and tick() - State.lastCardBuy >= CONFIG.Intervals.CardCooldown then
+			State.lastCardBuy = tick()
+			fireCardDetector(best.card)
 		end
 	end
 
-	local currentValidCards = {}
+	local current = {}
 	for rank, data in ipairs(cardData) do
 		local card = data.card
-		currentValidCards[card] = true
-		local btn = merchantListButtons[card]
-		if not btn then
-			btn = new("TextButton", {
-				Name                   = "CardEntry",
-				Size                   = UDim2.new(1, 0, 0, 26),
-				BackgroundColor3       = C.Panel,
-				Font                   = CONFIG.Font,
-				TextSize               = 14,
-				TextColor3             = C.On,
-				TextStrokeTransparency = 1,
-				TextWrapped            = false,
-				AutoButtonColor        = false,
-			}, MerchantsListFrame)
+		current[card] = true
 
+		local entry = merchantButtons[card]
+		if not entry then
+			local btn = new("TextButton", {
+				Name = "CardEntry", Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = C.Panel,
+				Font = CONFIG.Font, TextSize = 14, TextColor3 = C.On, TextStrokeTransparency = 1,
+				TextWrapped = false, AutoButtonColor = false, TextXAlignment = Enum.TextXAlignment.Left,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+			}, MerchantsListFrame)
 			addCorner(btn, 6)
 			addStroke(btn, C.Stroke, 1)
+			new("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, btn)
+			entry = { btn = btn, text = "" }
+			merchantButtons[card] = entry
 
-			new("UIPadding", {
-				PaddingLeft  = UDim.new(0, 8),
-				PaddingRight = UDim.new(0, 8),
-			}, btn)
-
-			merchantListButtons[card] = btn
-			btn.MouseButton1Click:Connect(function() fireCardDetector(card) end)
-
-			btn.MouseEnter:Connect(function()
-				btn.BackgroundColor3 = C.Header
+			btn.MouseButton1Click:Connect(function()
+				fireCardDetector(card)
 			end)
-			btn.MouseLeave:Connect(function()
-				btn.BackgroundColor3 = C.Panel
-			end)
+			btn.MouseEnter:Connect(function() btn.BackgroundColor3 = C.Header end)
+			btn.MouseLeave:Connect(function() btn.BackgroundColor3 = C.Panel end)
 		end
 
-		btn.Text = string.format("* %s  |  %s  |  %s", card.Name, data.priceText, data.bitsText)
-		btn.LayoutOrder = rank
-		btn.Visible = true
+		local text = string.format("%s  |  %s  |  %s bits", card.Name, data.priceStr, formatNumber(data.bits))
+		if entry.text ~= text then
+			entry.text = text
+			entry.btn.Text = text
+		end
+		entry.btn.LayoutOrder = rank
+		entry.btn.Visible = true
 	end
 
-	for item, btn in pairs(merchantListButtons) do
-		if not currentValidCards[item] then
-			btn:Destroy()
-			merchantListButtons[item] = nil
+	for card, entry in pairs(merchantButtons) do
+		if not current[card] then
+			entry.btn:Destroy()
+			merchantButtons[card] = nil
 		end
 	end
 end
 
 -- Rebirth
-local globalProgressLabel, globalCappedObj, globalNumbersLabel
-local lastNumbersText = ""
-
-local function rebirthPair(n) return string.format("(%d --> %d)", n, n + 1) end
-local function isBlank(s) return s == nil or s == "" or s == "N/A" end
-
-local function checkCappedState()
-	if not globalCappedObj then
-		local playerGui = getPlayerGui()
-		local main = playerGui and playerGui:FindFirstChild("Main")
-		if main and main:FindFirstChild("Rebirth", true) then
-			globalCappedObj = main.Rebirth:FindFirstChild("Capped", true)
-		end
-		if not globalCappedObj then
-			local starterMain = StarterGui:FindFirstChild("Main")
-			if starterMain then globalCappedObj = starterMain:FindFirstChild("Capped", true) end
-		end
+local function setStatus(text)
+	if State.status ~= text then
+		State.status = text
+		setText(StatusLabel, "Status: " .. text)
 	end
-	if not globalCappedObj then return false end
-	local targetObj = globalCappedObj
+end
+
+local function getObeliskClick()
+	local obelisk = Workspace:FindFirstChild("Obelisk")
+	local button = obelisk and obelisk:FindFirstChild("RebirthButton")
+	return button and button:FindFirstChild("Click")
+end
+
+local function clickRebirthButton()
 	local playerGui = getPlayerGui()
-	if globalCappedObj:IsDescendantOf(StarterGui) and playerGui then
-		local relativePath = globalCappedObj:GetFullName():gsub("^StarterGui", "PlayerGui")
-		local found = playerGui
-		for part in relativePath:gmatch("[^%.]+") do
-			if part ~= "PlayerGui" then
-				found = found:FindFirstChild(part)
-				if not found then break end
-			end
-		end
-		if found then targetObj = found end
-	end
-	local current = targetObj
-	local ok, result = pcall(function()
-		while current do
-			if current:IsA("GuiObject") and not current.Visible then return false end
-			if current:IsA("ScreenGui") then return current.Enabled end
-			current = current.Parent
-		end
-		return true
-	end)
-	return ok and result or false
+	local main = playerGui and playerGui:FindFirstChild("Main")
+	local frame = main and main:FindFirstChild("Rebirth")
+	if not frame or not frame.Visible then return false end
+
+	local button = frame:FindFirstChild("Rebirth", true)
+	if not (button and button:IsA("GuiButton") and button.Visible) then return false end
+
+	local pos, size = button.AbsolutePosition, button.AbsoluteSize
+	local inset = GuiService:GetGuiInset()
+	local x = pos.X + size.X / 2
+	local y = pos.Y + size.Y / 2 + inset.Y
+	VirtualInputManager:SendMouseMoveEvent(x, y, game)
+	task.wait(0.02)
+	VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
+	task.wait(0.05)
+	VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
+	return true
 end
 
--- Mở GUI Rebirth bằng cách kích hoạt ClickDetector của Obelisk
+-- Manual: press the physical Rebirth button; the game opens its own GUI.
 local function openRebirthGui()
-	pcall(function()
-		local clickPart = resolvePath({ "Workspace", table.unpack(CONFIG.Rebirth.ObeliskPath) })
-		local detector = clickPart and clickPart:FindFirstChildOfClass("ClickDetector")
-		if detector then
-			detector.MaxActivationDistance = math.huge
-			fireclickdetector(detector)
-		end
-	end)
-end
+	if State.isRebirthing then return end
 
-local function clickRebirthConfirm()
-	local gui = getPlayerGui() or localPlayer:WaitForChild("PlayerGui", 3)
-	if not gui then return end
-	local function realClick(btn)
-		local pos, size = btn.AbsolutePosition, btn.AbsoluteSize
-		local inset = GuiService:GetGuiInset()
-		local x = pos.X + size.X / 2
-		local y = pos.Y + size.Y / 2 + inset.Y
-		VirtualInputManager:SendMouseMoveEvent(x, y, game)
-		task.wait(0.02)
-		VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
-		task.wait(0.05)
-		VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
-	end
-	for _, v in ipairs(gui:GetDescendants()) do
-		if (v:IsA("TextButton") or v:IsA("ImageButton")) and v.Visible then
-			local nameCheck = string.upper(tostring(v.Name or ""))
-			local textCheck = ""
-			if v:IsA("TextButton") then
-				pcall(function() textCheck = string.upper(tostring(v.Text or "")) end)
-			end
-			if nameCheck == "REBIRTH" or nameCheck == "REBIRTHBUTTON" or string.find(textCheck, "REBIRTH") then
-				realClick(v)
-				break
-			end
-		end
-	end
-end
-
-local function triggerRebirth()
-	if not State.isRebirthing then
-		State.isRebirthing = true
-		task.spawn(function()
-			openRebirthGui()
-			task.wait(CONFIG.Rebirth.ConfirmDelay)
-			pcall(clickRebirthConfirm)
-			task.wait(CONFIG.Rebirth.Cooldown)
-			State.isRebirthing = false
-		end)
-	end
-	if not State.isTeleportingPlot then
-		State.isTeleportingPlot = true
-		task.spawn(function()
-			pcall(function()
-				task.wait(CONFIG.Rebirth.TeleportDelay)
-				local myPlotName = getMyPlot()
-				local plots = Workspace:FindFirstChild("Plots")
-				local plotObj = myPlotName ~= "None" and plots and plots:FindFirstChild(myPlotName)
-				local root = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
-				if plotObj and root then root.CFrame = getPlotSpawnCFrame(plotObj) end
-			end)
-			State.isTeleportingPlot = false
-		end)
-	end
-end
-
-local function updateMonitor()
-	local textVal = globalProgressLabel and globalProgressLabel.Text or ""
-	local rawNumbersVal = globalNumbersLabel and globalNumbersLabel.Text or ""
-	local numbersVal = rawNumbersVal
-
-	if not isBlank(rawNumbersVal) then
-		local current = tonumber(string.match(rawNumbersVal, "(%d+)"))
-		if current then numbersVal = rebirthPair(current) end
-	end
-
-	if isBlank(numbersVal) then
-		local leaderstats = localPlayer:FindFirstChild("leaderstats") or localPlayer:FindFirstChild("stats")
-		local rebirthVal = leaderstats and (leaderstats:FindFirstChild("Rebirths") or leaderstats:FindFirstChild("Rebirth") or leaderstats:FindFirstChild("Rank") or leaderstats:FindFirstChild("RebirthsCount"))
-		if rebirthVal then numbersVal = rebirthPair(tonumber(rebirthVal.Value) or 0) end
-	end
-
-	if isBlank(numbersVal) then
-		local pGui = getPlayerGui()
-		if pGui then
-			for _, v in ipairs(pGui:GetDescendants()) do
-				if v:IsA("TextLabel") and v.Visible then
-					local nameCheck = string.lower(v.Name)
-					if (string.find(nameCheck, "reb") or string.find(nameCheck, "rank")) and string.match(v.Text, "%d+") then
-						local num = tonumber(string.match(v.Text, "(%d+)"))
-						if num then numbersVal = rebirthPair(num); break end
-					end
-				end
-			end
-		end
-	end
-
-	if not isBlank(numbersVal) then
-		if lastNumbersText == "" then
-			lastNumbersText = numbersVal
-		elseif numbersVal ~= lastNumbersText then
-			local oldFrom = string.match(lastNumbersText, "%((%d+)%s*%-%->%s*%d+%)")
-			local newFrom = string.match(numbersVal, "%((%d+)%s*%-%->%s*%d+%)")
-			if oldFrom and newFrom and tonumber(newFrom) > tonumber(oldFrom) then lastNumbersText = numbersVal end
-		end
-	end
-
-	local displayNumbers = (not isBlank(numbersVal)) and numbersVal or (lastNumbersText ~= "" and lastNumbersText or "N/A")
-	local isCappedVisible = checkCappedState()
-
-	RebirthLabel.Text = "Progress: " .. (textVal ~= "" and textVal or "N/A")
-	CappedStatusLabel.Text = "Capped: " .. (isCappedVisible and "TRUE" or "FALSE")
-	NumbersLabel.Text = "Rebirth(s): " .. displayNumbers
-
-	local percent = textVal ~= "" and parseProgress(textVal) or 0
-
-	if State.autoRebirthEnabled then
-		local rebirthNotiText = trackedTexts["RebirthNotification"]
-		local hasRebirthNoti = rebirthNotiText ~= nil and rebirthNotiText ~= "" and rebirthNotiText ~= "N/A"
-		local mode = CONFIG.Rebirth.Modes[State.rebirthModeIndex].id
-		local shouldRebirth
-		if mode == "Any" then
-			shouldRebirth = isEssenceCapped() or hasRebirthNoti
-		elseif mode == "Essence" then
-			shouldRebirth = isEssenceCapped()
-		else
-			shouldRebirth = hasRebirthNoti
-		end
-		if shouldRebirth then triggerRebirth() end
-	end
-
-	PercentLabel.Text = string.format("%.1f%%", percent)
-
-	if (State.autoRebirthEnabled and percent >= 100) or percent >= 99 then
-		UIGradient.Color = ColorSequence.new(C.On)
-	else
-		UIGradient.Color = ColorSequence.new(Color3.fromRGB(255, 0, 0):Lerp(C.On, percent / 100))
-	end
-
-	ProgressBarFill:TweenSize(UDim2.new(percent / 100, 0, 1, 0), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
-end
-
--- Manual: chỉ mở GUI Rebirth, không tự xác nhận, không teleport
-ManualRebirthBtn.MouseButton1Click:Connect(function()
-	openRebirthGui()
-end)
-
-task.spawn(function()
-	local textConn, cappedConn, numbersConn, leaderConn
-	cleanupHooks[#cleanupHooks + 1] = function()
-		for _, conn in ipairs({ textConn, cappedConn, numbersConn, leaderConn }) do
-			if conn then conn:Disconnect() end
-		end
-	end
-	local function hookMonitor(gui)
-		if textConn then textConn:Disconnect() textConn = nil end
-		if cappedConn then cappedConn:Disconnect() cappedConn = nil end
-		if numbersConn then numbersConn:Disconnect() numbersConn = nil end
-		pcall(function()
-			globalProgressLabel = gui:WaitForChild("System", 2):WaitForChild("RebirthProgress", 2):WaitForChild("Progress", 2):WaitForChild("TextLabel", 2)
-		end)
-		pcall(function()
-			local rebirthFrame = gui:FindFirstChild("Main") and gui.Main:FindFirstChild("Rebirth")
-			if rebirthFrame then globalCappedObj = rebirthFrame:FindFirstChild("Capped", true) end
-			if not globalCappedObj then
-				local starterRebirth = StarterGui:FindFirstChild("Main") and StarterGui.Main:FindFirstChild("Rebirth")
-				if starterRebirth then globalCappedObj = starterRebirth:FindFirstChild("Capped", true) end
-			end
-		end)
-		pcall(function()
-			local holder = gui:WaitForChild("System", 2):WaitForChild("PlayerList", 2):WaitForChild("Holder", 2)
-			local myHolder = holder:FindFirstChild(localPlayer.Name) or holder:FindFirstChildWhichIsA("Frame")
-			if myHolder then globalNumbersLabel = myHolder:WaitForChild("RebsText", 2) end
-		end)
-		pcall(function()
-			if not globalNumbersLabel then
-				local rebirthFrame = gui:FindFirstChild("Main") and gui.Main:FindFirstChild("Rebirth")
-				if rebirthFrame then globalNumbersLabel = rebirthFrame:FindFirstChild("Numbers", true) end
-			end
-		end)
-		if globalProgressLabel then textConn = globalProgressLabel:GetPropertyChangedSignal("Text"):Connect(updateMonitor) end
-		if globalCappedObj then cappedConn = globalCappedObj:GetPropertyChangedSignal("Visible"):Connect(updateMonitor) end
-		if globalNumbersLabel then numbersConn = globalNumbersLabel:GetPropertyChangedSignal("Text"):Connect(updateMonitor) end
-		local leaderstats = localPlayer:FindFirstChild("leaderstats") or localPlayer:FindFirstChild("stats")
-		local cashVal = leaderstats and (leaderstats:FindFirstChild("Cash") or leaderstats:FindFirstChild("Money"))
-		if cashVal then
-			if leaderConn then leaderConn:Disconnect() end
-			leaderConn = cashVal:GetPropertyChangedSignal("Value"):Connect(updateMonitor)
-		end
-		updateMonitor()
-	end
-	hookMonitor(localPlayer:WaitForChild("PlayerGui"))
-	track(localPlayer.CharacterAdded:Connect(function()
-		task.wait(1)
-		if running then hookMonitor(localPlayer:WaitForChild("PlayerGui")) end
-	end))
-	while running do
-		task.wait(CONFIG.Intervals.MonitorPoll)
-		if running then updateMonitor() end
-	end
-end)
-
--- Auto Buy Loop
-local lastAutoBuyTime = 0
-
-local function updateShop()
-	local cashNum, cashStr = getPlayerCash()
-	local currentPlot = getMyPlot()
-
-	StatsLabel.Text = string.format("Stats:\nCash: %s\nPlot: %s\nEssence Capped: %s", cashStr or tostring(cashNum), currentPlot, isEssenceCapped() and "True" or "False")
-
-	local myTycoon = getMyTycoon()
-	if not myTycoon or not myTycoon:FindFirstChild("Buttons") then
-		clearGuidelines()
+	local playerGui = getPlayerGui()
+	local main = playerGui and playerGui:FindFirstChild("Main")
+	local frame = main and main:FindFirstChild("Rebirth")
+	if frame and frame.Visible then
+		setStatus("Rebirth GUI already open")
 		return
 	end
 
-	local affordable, allItems = {}, {}
-	for _, btn in ipairs(myTycoon.Buttons:GetChildren()) do
-		local priceNum, priceStr, displayName = getButtonDetails(btn)
-		if priceNum then
+	local clickPart = getObeliskClick()
+	local detector = clickPart and clickPart:FindFirstChildOfClass("ClickDetector")
+	if not detector then
+		setStatus("Rebirth button not found")
+		return
+	end
+
+	detector.MaxActivationDistance = math.huge
+	pcall(fireclickdetector, detector, 0, "mouseclick")
+	setStatus("Rebirth GUI opened")
+end
+
+-- Auto: press the physical button, wait for the game's GUI, then press REBIRTH.
+local function triggerRebirth()
+	if State.isRebirthing then return end
+	if tick() - State.lastRebirthAttempt < CONFIG.Rebirth.RetryCooldown then return end
+	State.lastRebirthAttempt = tick()
+	State.isRebirthing = true
+	setStatus("Rebirthing...")
+
+	task.spawn(function()
+		local ok, err = pcall(function()
+			local clickPart = getObeliskClick()
+			local detector = clickPart and clickPart:FindFirstChildOfClass("ClickDetector")
+			if not detector then
+				State.autoRebirthArmed = false
+				return
+			end
+
+			local playerGui = getPlayerGui()
+			local main = playerGui and playerGui:FindFirstChild("Main")
+			local frame = main and main:FindFirstChild("Rebirth")
+			local alreadyOpen = frame ~= nil and frame.Visible
+
+			local before = getRebirthCount()
+			if not alreadyOpen then
+				detector.MaxActivationDistance = math.huge
+				pcall(fireclickdetector, detector, 0, "mouseclick")
+			end
+
+			-- Wait for the game's Rebirth GUI (or an immediate rebirth).
+			local guiDeadline = tick() + 4
+			local guiShown = alreadyOpen
+			local rebirthStarted = false
+			while not guiShown and tick() < guiDeadline do
+				local now = getRebirthCount()
+				if before ~= nil and now ~= nil and now > before then
+					rebirthStarted = true
+					break
+				end
+				local pg = getPlayerGui()
+				local m = pg and pg:FindFirstChild("Main")
+				local f = m and m:FindFirstChild("Rebirth")
+				if f and f.Visible then
+					guiShown = true
+					break
+				end
+				task.wait(0.1)
+			end
+
+			if rebirthStarted then
+				setStatus("Rebirth done")
+				return
+			end
+
+			if not guiShown then
+				setStatus("Rebirth GUI did not open")
+				State.autoRebirthArmed = false
+				return
+			end
+
+			task.wait(CONFIG.Rebirth.ConfirmDelay)
+			if not clickRebirthButton() then
+				setStatus("Rebirth button not found")
+				State.autoRebirthArmed = false
+				if frame then frame.Visible = false end
+				return
+			end
+
+			local deadline = tick() + 6
+			local confirmed = false
+			while tick() < deadline do
+				local now = getRebirthCount()
+				if before ~= nil and now ~= nil and now > before then
+					confirmed = true
+					break
+				end
+				task.wait(0.2)
+			end
+
+			if confirmed then
+				setStatus("Rebirth done")
+			else
+				setStatus("Rebirth click sent")
+				State.autoRebirthArmed = false
+				if frame then frame.Visible = false end
+			end
+		end)
+
+		if not ok then
+			setStatus("Rebirth error: " .. tostring(err):sub(1, 50))
+			State.autoRebirthArmed = false
+		end
+
+		task.wait(CONFIG.Rebirth.Cooldown)
+		State.isRebirthing = false
+	end)
+end
+
+ManualRebirthBtn.MouseButton1Click:Connect(openRebirthGui)
+
+LoadTelekinesisBtn.MouseButton1Click:Connect(function()
+	if State.isLoadingTelekinesis then return end
+	State.isLoadingTelekinesis = true
+	LoadTelekinesisBtn.Text = "Loading..."
+	LoadTelekinesisBtn.BackgroundColor3 = C.Accent
+	setStatus("Loading Telekinesis...")
+
+	task.spawn(function()
+		local ok, err = pcall(function()
+			local source = game:HttpGet("https://raw.githubusercontent.com/lpot1/poop-script/refs/heads/main/Telekinesis.lua")
+			local chunk, compileErr = loadstring(source)
+			if not chunk then error(compileErr or "loadstring failed") end
+			chunk()
+		end)
+
+		if ok then
+			LoadTelekinesisBtn.Text = "Telekinesis"
+			LoadTelekinesisBtn.BackgroundColor3 = C.Panel
+			setStatus("Telekinesis ready")
+		else
+			LoadTelekinesisBtn.Text = "Failed"
+			LoadTelekinesisBtn.BackgroundColor3 = C.Danger
+			setStatus("Telekinesis error: " .. tostring(err):sub(1, 60))
+		end
+		State.isLoadingTelekinesis = false
+	end)
+end)
+
+InventoryToggleBtn.MouseButton1Click:Connect(function()
+	State.inventoryEnabled = not State.inventoryEnabled
+	local on = State.inventoryEnabled
+	InventoryToggleBtn.Text = "Inventory: " .. (on and "ON" or "OFF")
+	InventoryToggleBtn.BackgroundColor3 = on and C.On or C.Panel
+
+	local ok, err = pcall(function()
+		StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, on)
+	end)
+	if not ok then
+		setStatus("Inventory error: " .. tostring(err):sub(1, 50))
+	end
+end)
+
+-- Jobs
+local function scanButtons(tycoon, cash)
+	local all, affordable = {}, {}
+	local buttons = tycoon and tycoon:FindFirstChild("Buttons")
+	if not buttons then return all, affordable end
+
+	for _, btn in ipairs(buttons:GetChildren()) do
+		local price, priceStr, name = getButtonDetails(btn)
+		if price then
 			local item = {
 				instance = btn,
-				name = displayName or btn.Name,
-				price = priceNum,
-				priceStr = priceStr or tostring(priceNum),
-				canAfford = cashNum >= priceNum,
+				name = name,
+				price = price,
+				priceStr = priceStr,
+				canAfford = cash >= price,
 			}
-			table.insert(allItems, item)
-			if item.canAfford then
-				table.insert(affordable, item)
-			end
+			all[#all + 1] = item
+			if item.canAfford then affordable[#affordable + 1] = item end
 		end
 	end
 
 	table.sort(affordable, function(a, b) return a.price < b.price end)
+	return all, affordable
+end
 
-	if State.autoBuyEnabled and localPlayer.Character and #affordable > 0 then
-		local modeId = CONFIG.BuyModes[State.buyModeIndex].id
-		if modeId == "Remote" then
-			local root = localPlayer.Character:FindFirstChild("HumanoidRootPart")
-			if root and firetouchinterest then
-				local passes = 0
-				local boughtAny = false
-				repeat
-					boughtAny = false
-					passes = passes + 1
-					for _, item in ipairs(affordable) do
-						local btn = item.instance
-						if isButtonActive(btn) then
-							local btnPart = btn:IsA("BasePart") and btn
-								or btn:FindFirstChild("Head")
-								or btn:FindFirstChild("Part")
-								or btn:FindFirstChildWhichIsA("BasePart")
-							if btnPart then
-								firetouchinterest(root, btnPart, 0)
-								task.wait(0.01)
-								firetouchinterest(root, btnPart, 1)
-								boughtAny = true
-							end
-						end
+local function performRemoteBuy(tycoon, affordable)
+	if State.isBuying or State.isRebirthing then return end
+	State.isBuying = true
+
+	task.spawn(function()
+		pcall(function()
+			local character = localPlayer.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+
+			for _ = 1, 4 do
+				if not running or not root or not root.Parent then break end
+				local bought = false
+				for _, item in ipairs(affordable) do
+					if isButtonActive(item.instance) then
+						pcall(firetouchinterest, root, item.instance, 1)
+						task.wait(0.015)
+						pcall(firetouchinterest, root, item.instance, 0)
+						bought = true
 					end
-					if boughtAny and passes < 5 then
-						task.wait(0.02)
-						cashNum = getPlayerCash()
-						affordable = {}
-						for _, btn in ipairs(myTycoon.Buttons:GetChildren()) do
-							local pNum = getButtonDetails(btn)
-							if pNum and cashNum >= pNum then
-								table.insert(affordable, { instance = btn, price = pNum })
-							end
-						end
-					end
-				until not boughtAny or passes >= 5
-			end
-		else
-			if tick() - lastAutoBuyTime >= CONFIG.Intervals.AutoBuyCooldown then
-				local target = affordable[1]
-				if target and isButtonActive(target.instance) then
-					lastAutoBuyTime = tick()
-					moveToTarget(target.instance)
 				end
+				if not bought then break end
+
+				task.wait(0.12)
+				if not running then break end
+				local cash = getPlayerCash(true)
+				local _, nextAffordable = scanButtons(tycoon, cash)
+				affordable = nextAffordable
+				if #affordable == 0 then break end
+			end
+		end)
+
+		State.isBuying = false
+	end)
+end
+
+local lastAutoBuy = 0
+local function updateShop()
+	local cash, cashStr = getPlayerCash()
+	local tycoon = getMyTycoon()
+	local all, affordable = scanButtons(tycoon, cash)
+
+	if State.autoBuyEnabled and not State.isRebirthing and #affordable > 0 then
+		local mode = CONFIG.BuyModes[State.buyModeIndex].id
+		if mode == "Remote" then
+			performRemoteBuy(tycoon, affordable)
+		elseif tick() - lastAutoBuy >= CONFIG.Intervals.AutoBuyCooldown then
+			local target = affordable[1]
+			if target and isButtonActive(target.instance) then
+				lastAutoBuy = tick()
+				moveToTarget(target.instance)
 			end
 		end
 	end
 
-	updateGuidelines(allItems)
+	updateGuidelines(all)
+	return cashStr
 end
 
--- Main Scheduler
-local scheduled = {
-	{ interval = CONFIG.Intervals.MerchantUpdate, last = 0, fn = highlightMerchants },
-	{ interval = CONFIG.Intervals.ShopUpdate,     last = 0, fn = updateShop },
-	{ interval = CONFIG.Intervals.MerchantLocator,last = 0, fn = updateMerchantLocator },
+local lastStats = ""
+local function updateStats()
+	local _, cashStr = getPlayerCash()
+	local plot = getMyPlot()
+	local essenceCapped = isEssenceCapped()
+	local progressText = getProgressText()
+	local percent = parseProgress(progressText)
+
+	local statsText = string.format("Stats:\nCash: %s\nPlot: %s\nEssence Capped: %s\nBit Generator: %s",
+		cashStr, plot and plot.Name or "?", essenceCapped and "True" or "False", getBitsGeneratorTime())
+	if statsText ~= lastStats then
+		lastStats = statsText
+		StatsLabel.Text = statsText
+	end
+
+	setText(RebirthLabel, "Progress: " .. (progressText ~= "" and progressText or "N/A"))
+	setText(CappedStatusLabel, "Capped: " .. (essenceCapped and "TRUE" or "FALSE"))
+	setText(PercentLabel, string.format("%.1f%%", percent))
+	setText(StatusLabel, "Status: " .. State.status)
+
+	ProgressGradient.Color = percent >= 99
+		and ColorSequence.new(C.On)
+		or ColorSequence.new(Color3.fromRGB(255, 0, 0):Lerp(C.On, percent / 100))
+
+	local targetSize = UDim2.new(percent / 100, 0, 1, 0)
+	if ProgressBarFill.Size.X.Scale ~= targetSize.X.Scale then
+		ProgressBarFill:TweenSize(targetSize, Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
+	end
+end
+
+local function updateRebirth()
+	if not State.autoRebirthEnabled or State.isRebirthing then
+		State.autoRebirthArmed = false
+		return
+	end
+
+	-- Essence Cap ON  -> only when essence is capped AND the game is ready to rebirth.
+	-- Essence Cap OFF -> normal rebirth readiness only.
+	local ready = parseProgress(getProgressText()) >= 100 or hasRebirthNotification()
+	local should
+	if State.essenceCapEnabled then
+		should = ready and isEssenceCapped()
+	else
+		should = ready
+	end
+
+	if should then
+		if not State.autoRebirthArmed and tick() - State.lastRebirthAttempt >= CONFIG.Rebirth.RetryCooldown then
+			State.autoRebirthArmed = true
+			triggerRebirth()
+		end
+	else
+		State.autoRebirthArmed = false
+	end
+end
+
+-- Main scheduler
+local jobs = {
+	{ interval = CONFIG.Intervals.Shop,     last = 0, fn = updateShop },
+	{ interval = CONFIG.Intervals.Stats,    last = 0, fn = updateStats },
+	{ interval = CONFIG.Intervals.Merchant, last = 0, fn = highlightMerchants },
+	{ interval = CONFIG.Intervals.Locator,  last = 0, fn = updateMerchantLocator },
+	{ interval = CONFIG.Intervals.Rebirth,  last = 0, fn = updateRebirth },
 }
 
 track(RunService.Heartbeat:Connect(function()
+	if not running then return end
 	local now = tick()
-	for _, job in ipairs(scheduled) do
+	for _, job in ipairs(jobs) do
 		if now - job.last >= job.interval then
 			job.last = now
-			job.fn(now)
+			local ok, err = pcall(job.fn)
+			if not ok then
+				setStatus("Error: " .. tostring(err):sub(1, 60))
+			end
 		end
 	end
 end))
@@ -1397,11 +1499,17 @@ track(localPlayer.Idled:Connect(function()
 	end
 end))
 
--- Cleanup on re-execution or close
+-- Cleanup
 env.TycoonManagerCleanup = function()
 	running = false
+	cancelPath()
+
+	pcall(function()
+		StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, true)
+	end)
+
 	for _, connection in ipairs(connections) do
-		connection:Disconnect()
+		pcall(function() connection:Disconnect() end)
 	end
 	table.clear(connections)
 
@@ -1410,16 +1518,15 @@ env.TycoonManagerCleanup = function()
 	end
 	table.clear(cleanupHooks)
 
-	pcall(cancelPath)
 	pcall(clearGuidelines)
 	pcall(clearBeams, merchantBeams)
 
-	for _, btn in pairs(merchantListButtons) do
-		btn:Destroy()
+	for _, entry in pairs(merchantButtons) do
+		pcall(function() entry.btn:Destroy() end)
 	end
-	table.clear(merchantListButtons)
+	table.clear(merchantButtons)
+	table.clear(buttonCache)
 
 	ScreenGui:Destroy()
 	env.TycoonManagerCleanup = nil
 end
-
