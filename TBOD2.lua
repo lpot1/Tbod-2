@@ -173,7 +173,7 @@ local State = {
 	autoRebirthArmed       = false,
 	isMinimized            = false,
 	isLoadingTelekinesis   = false,
-	inventoryEnabled       = true,
+	inventoryEnabled       = false,
 	activeTab              = "Stats",
 	status                 = "Idle",
 	lastRebirthAttempt     = 0,
@@ -439,7 +439,10 @@ new("TextLabel", {
 }, PanelMisc)
 
 local LoadTelekinesisBtn = makeButton(PanelMisc, "LoadTelekinesisBtn", "Telekinesis", C.Panel)
-local InventoryToggleBtn = makeButton(PanelMisc, "InventoryToggleBtn", "Inventory: ON", C.On)
+local InventoryToggleBtn = makeButton(PanelMisc, "InventoryToggleBtn", "Inventory: OFF", C.Panel)
+pcall(function()
+	StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+end)
 
 -- Tabs
 local panels = { Stats = PanelStats, ["Auto Farm"] = PanelAutoFarm, Misc = PanelMisc }
